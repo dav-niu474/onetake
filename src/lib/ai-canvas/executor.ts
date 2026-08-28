@@ -345,8 +345,57 @@ async function runPool<T>(tasks: (() => Promise<T>)[], limit: number): Promise<P
   return results
 }
 
-/** 整图运行的最大并发度（AI 生成接口按 3 并发较为稳妥） */
-const MAX_PARALLEL = 3
+/* ---------- 按节点类型分池限流 ----------
+ * LLM / TTS 接口并发 3 时必现 429（实测），单独限 2；
+ * AI 媒体生成（图/视频）限 3；ffmpeg 本地进程限 2（IO 密集，避免拖垮机器）。
+ */
+type PoolCategory = 'llm' | 'media' | 'ffmpeg'
+
+const POOL_LIMITS: Record<PoolCategory, number> = {
+  llm: 2,
+  media: 3,
+  ffmpeg: 2,
+}
+
+/** 整图运行的全局最大并发度（各类池叠加后的总量上限） */
+const MAX_PARALLEL = 6
+
+function poolCategoryOf(nodeType: string): PoolCategory {
+  if (nodeType === 'enhancer' || nodeType === 'tts') return 'llm'
+  if (nodeType === 'concat' || nodeType === 'avMerge') return 'ffmpeg'
+  return 'media'
+}
+
+class Semaphore {
+  private active = 0
+  private waiters: (() => void)[] = []
+  constructor(private readonly limit: number) {}
+  /** 当前是否还有空闲额度（用于预估排队提示） */
+  available() {
+    return this.active < this.limit
+  }
+  async acquire(): Promise<void> {
+    if (this.active < this.limit) {
+      this.active++
+      return
+    }
+    await new Promise<void>((resolve) => this.waiters.push(resolve))
+    this.active++
+  }
+  release() {
+    this.active--
+    const next = this.waiters.shift()
+    if (next) next()
+  }
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    await this.acquire()
+    try {
+      return await fn()
+    } finally {
+      this.release()
+    }
+  }
+}
 
 /** 运行整个工作流（拓扑分层 + 层内并行执行） */
 export async function runWorkflow() {
@@ -395,9 +444,27 @@ export async function runWorkflow() {
       return node && NODE_SPECS[node.type]?.executable
     })
     if (execIds.length > 0) {
-      execIds.forEach((id) => setNodeRunState(id, 'queued', { stage: '排队中' }))
+      const sems: Record<PoolCategory, Semaphore> = {
+        llm: new Semaphore(POOL_LIMITS.llm),
+        media: new Semaphore(POOL_LIMITS.media),
+        ffmpeg: new Semaphore(POOL_LIMITS.ffmpeg),
+      }
+      const typeOf = (id: string) =>
+        useCanvasStore.getState().nodes.find((n) => n.id === id)?.type ?? ''
+      execIds.forEach((id) =>
+        setNodeRunState(id, 'queued', { stage: '排队中' }),
+      )
       const results = await runPool(
-        execIds.map((id) => () => runNode(id)),
+        execIds.map((id) => {
+          const cat = poolCategoryOf(typeOf(id))
+          return () => {
+            // 同类任务池已满时，提前提示「等待并发额度」而非笼统的排队中
+            if (!sems[cat].available()) {
+              setNodeRunState(id, 'queued', { stage: '等待同类任务完成…' })
+            }
+            return sems[cat].run(() => runNode(id))
+          }
+        }),
         MAX_PARALLEL,
       )
       let layerFailed = false

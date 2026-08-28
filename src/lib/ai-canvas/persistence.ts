@@ -31,7 +31,11 @@ function serializeGraph() {
     targetHandle: e.targetHandle,
     type: 'canvas',
   }))
-  return { nodes: cleanNodes, edges: cleanEdges }
+  return {
+    nodes: cleanNodes,
+    edges: cleanEdges,
+    groups: structuredClone(useCanvasStore.getState().groups),
+  }
 }
 
 /**
@@ -103,13 +107,14 @@ export async function saveWorkflow(): Promise<string | null> {
     }
     useCanvasStore.getState().markSaved(id)
     // 将近期游离的执行记录挂靠到本工作流，便于刷新后恢复任务
+    // （带 nodeId + nodeType 双重匹配，避免与其他工作流的同名节点误挂靠）
     try {
       await fetch('/api/executions/attach', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           workflowId: id,
-          nodeIds: graph.nodes.map((n) => n.id),
+          nodes: graph.nodes.map((n) => ({ id: n.id, type: n.type })),
         }),
       })
     } catch {
@@ -147,7 +152,13 @@ export async function openWorkflow(id: string) {
     }))
     const edges = (graph.edges ?? []).map((e) => ({ ...e, selected: false }))
     store.loadGraph(
-      { nodes, edges },
+      {
+        nodes,
+        edges,
+        groups: Array.isArray(graph.groups)
+          ? (graph.groups as typeof store.groups)
+          : [],
+      },
       { id: wf.id, name: wf.name, updatedAt: wf.updatedAt },
     )
     store.setLibraryOpen(false)
@@ -218,7 +229,16 @@ export function importWorkflowJson(file: File) {
         data: { ...n.data, runState: 'idle' as const, progress: 0 },
       }))
       const edges = graph.edges.map((e: Edge) => ({ ...e, selected: false }))
-      store.loadGraph({ nodes, edges }, { id: null, name })
+      store.loadGraph(
+        {
+          nodes,
+          edges,
+          groups: Array.isArray(graph.groups)
+            ? (graph.groups as typeof store.groups)
+            : [],
+        },
+        { id: null, name },
+      )
       syncOutputsAfterLoad()
       store.showToast('success', `已导入「${name}」`)
     } catch (e) {

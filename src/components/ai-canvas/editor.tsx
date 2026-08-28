@@ -27,12 +27,17 @@ import {
   Maximize,
   Layers,
   Grid3x3,
+  Boxes,
+  Pencil,
+  Ungroup as UngroupIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
   isConnectionValid,
   NODE_SPECS,
   NODE_TYPE_LIST,
+  GROUP_COLORS,
+  getGroupColor,
   type CanvasNodeData,
 } from '@/lib/ai-canvas/types'
 import { useCanvasStore } from '@/lib/ai-canvas/store'
@@ -48,6 +53,7 @@ import { LibraryDialog } from './library-dialog'
 import { TemplatesDialog } from './templates-dialog'
 import { AssetsDialog } from './assets-dialog'
 import { HistoryDialog } from './history-dialog'
+import { GroupLayer } from './group-layer'
 
 const nodeTypes: NodeTypes = Object.fromEntries(
   NODE_TYPE_LIST.map((s) => [s.type, GraphNode]),
@@ -58,17 +64,20 @@ interface MenuState {
   screen: { x: number; y: number }
   flow: { x: number; y: number }
   nodeId?: string
+  groupId?: string
 }
 
 function StatusBar() {
   const nodes = useCanvasStore((s) => s.nodes)
   const edges = useCanvasStore((s) => s.edges)
+  const groups = useCanvasStore((s) => s.groups)
   const running = useCanvasStore((s) => s.running)
   const snapToGrid = useCanvasStore((s) => s.snapToGrid)
   const setSnapToGrid = useCanvasStore((s) => s.setSnapToGrid)
   const zoom = useStore((s) => s.transform[2])
   const { fitView } = useReactFlow()
   const successCount = nodes.filter((n) => n.data.runState === 'success').length
+  const runningCount = nodes.filter((n) => n.data.runState === 'running').length
   const selectedCount = nodes.filter((n) => n.selected).length
 
   return (
@@ -76,6 +85,7 @@ function StatusBar() {
       <span className="flex items-center gap-1.5">
         <Layers className="h-3 w-3" />
         {nodes.length} 节点 · {edges.length} 连线
+        {groups.length > 0 && <span className="text-zinc-400"> · {groups.length} 分组</span>}
       </span>
       {selectedCount > 0 && (
         <span className="hidden text-zinc-400 sm:inline">已选 {selectedCount} 项</span>
@@ -83,7 +93,9 @@ function StatusBar() {
       {running && (
         <span className="flex items-center gap-1.5 text-amber-300">
           <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
-          <span className="hidden sm:inline">工作流运行中…</span>
+          <span className="hidden sm:inline">
+            工作流运行中…{runningCount > 0 ? `（${runningCount} 个节点）` : ''}
+          </span>
         </span>
       )}
       {!running && successCount > 0 && (
@@ -170,6 +182,9 @@ function CanvasInner() {
   const clearToast = useCanvasStore((s) => s.clearToast)
 
   const [menu, setMenu] = useState<MenuState | null>(null)
+  const selectedNodeCount = useCanvasStore(
+    (s) => s.nodes.reduce((acc, n) => acc + (n.selected ? 1 : 0), 0),
+  )
 
   /* ---------- 拖拽添加 ---------- */
   const onDragOver = useCallback((e: React.DragEvent) => {
@@ -314,8 +329,40 @@ function CanvasInner() {
         store.copySelection()
       } else if (meta && e.key.toLowerCase() === 'v') {
         store.pasteClipboard()
+      } else if (meta && e.key.toLowerCase() === 'g') {
+        e.preventDefault()
+        if (e.shiftKey) {
+          // Ctrl+Shift+G：解组当前选中分组（或包含所选节点的分组）
+          const st = useCanvasStore.getState()
+          let gid = st.selectedGroupId
+          if (!gid) {
+            const selectedIds = new Set(st.nodes.filter((n) => n.selected).map((n) => n.id))
+            const hit = st.groups.find((g) => g.nodeIds.some((id) => selectedIds.has(id)))
+            gid = hit?.id ?? null
+          }
+          if (gid) {
+            st.ungroup(gid)
+          } else {
+            st.showToast('info', '请先选中一个分组再解组')
+          }
+        } else {
+          store.createGroupFromSelection()
+        }
+        return
       }
-      if (e.key === 'Escape') setMenu(null)
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        // 分组框选中时 Delete = 解组（保留节点）；节点选中时交由 React Flow 删除
+        const st = useCanvasStore.getState()
+        if (st.selectedGroupId) {
+          e.preventDefault()
+          st.ungroup(st.selectedGroupId)
+          return
+        }
+      }
+      if (e.key === 'Escape') {
+        setMenu(null)
+        useCanvasStore.getState().setSelectedGroupId(null)
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -336,6 +383,17 @@ function CanvasInner() {
       setMenu({ screen: { x: e.clientX, y: e.clientY }, flow: position })
     },
     [screenToFlowPosition],
+  )
+
+  const openGroupMenu = useCallback(
+    (e: React.MouseEvent, groupId: string) => {
+      setMenu({
+        screen: { x: e.clientX, y: e.clientY },
+        flow: { x: 0, y: 0 },
+        groupId,
+      })
+    },
+    [],
   )
 
   const closeMenu = useCallback(() => setMenu(null), [])
@@ -381,8 +439,12 @@ function CanvasInner() {
               return true
             }}
             onPaneContextMenu={openPaneMenu}
-            onPaneClick={closeMenu}
+            onPaneClick={(e) => {
+              closeMenu()
+              useCanvasStore.getState().setSelectedGroupId(null)
+            }}
             onMoveStart={closeMenu}
+            onNodeClick={() => useCanvasStore.getState().setSelectedGroupId(null)}
             onNodeContextMenu={(e, node) => {
               e.preventDefault()
               setMenu({
@@ -424,10 +486,25 @@ function CanvasInner() {
               className="!mb-10 !mr-14 hidden md:block"
               style={{ width: 168, height: 108, borderRadius: 12 }}
               maskColor="rgba(9,9,11,0.72)"
-              nodeColor={(n) => getAccent(NODE_SPECS[n.type ?? '']?.accent).hex}
+              nodeColor={(n) => {
+                const rs = (n.data as CanvasNodeData | undefined)?.runState
+                if (rs === 'running') return '#f59e0b'
+                if (rs === 'queued') return '#38bdf8'
+                if (rs === 'failed') return '#f43f5e'
+                return getAccent(NODE_SPECS[n.type ?? '']?.accent).hex
+              }}
+              nodeStrokeColor={(n) => {
+                const rs = (n.data as CanvasNodeData | undefined)?.runState
+                if (rs === 'running') return '#fde68a'
+                if (rs === 'failed') return '#fda4af'
+                return 'transparent'
+              }}
               nodeStrokeWidth={2}
             />
           </ReactFlow>
+
+          {/* 节点分组渲染层（overlay，跟随视口 transform） */}
+          <GroupLayer onGroupContextMenu={openGroupMenu} />
 
           {/* 右侧 Inspector 属性面板（选中单个节点时） */}
           <Inspector />
@@ -465,11 +542,16 @@ function CanvasInner() {
               className="fixed z-50 w-52 overflow-hidden rounded-xl border border-zinc-700/80 bg-zinc-900/97 py-1 shadow-2xl backdrop-blur"
               style={{
                 left: Math.min(menu.screen.x, window.innerWidth - 220),
-                top: Math.min(menu.screen.y, window.innerHeight - 320),
+                top: Math.min(menu.screen.y, window.innerHeight - 380),
               }}
               onMouseLeave={closeMenu}
             >
-              {menu.nodeId ? (
+              {menu.groupId ? (
+                <GroupMenuItems
+                  groupId={menu.groupId}
+                  closeMenu={closeMenu}
+                />
+              ) : menu.nodeId ? (
                 <>
                   <p className="border-b border-zinc-800 px-3 pb-1.5 pt-1 text-[9px] uppercase tracking-wider text-zinc-600">
                     节点操作
@@ -502,6 +584,19 @@ function CanvasInner() {
                 </>
               ) : (
                 <>
+                  {selectedNodeCount >= 2 && (
+                    <>
+                      <MenuItem
+                        icon={<Boxes className="h-3.5 w-3.5 text-sky-300" />}
+                        label={`将 ${selectedNodeCount} 个所选节点编组`}
+                        onClick={() => {
+                          useCanvasStore.getState().createGroupFromSelection()
+                          closeMenu()
+                        }}
+                      />
+                      <div className="mx-2 my-1 h-px bg-zinc-800" />
+                    </>
+                  )}
                   <p className="border-b border-zinc-800 px-3 pb-1.5 pt-1 text-[9px] uppercase tracking-wider text-zinc-600">
                     添加节点
                   </p>
@@ -582,5 +677,80 @@ export function Editor() {
     <ReactFlowProvider>
       <CanvasInner />
     </ReactFlowProvider>
+  )
+}
+
+/** 分组右键菜单项：重命名 / 换色 / 解组 / 删除分组与成员 */
+function GroupMenuItems({
+  groupId,
+  closeMenu,
+}: {
+  groupId: string
+  closeMenu: () => void
+}) {
+  const group = useCanvasStore((s) => s.groups.find((g) => g.id === groupId))
+  if (!group) return null
+  const color = getGroupColor(group.color)
+  return (
+    <>
+      <p className="flex items-center gap-1.5 border-b border-zinc-800 px-3 pb-1.5 pt-1 text-[9px] uppercase tracking-wider text-zinc-600">
+        <span className={cn('h-2 w-2 rounded-full', color.dot)} />
+        分组 · {group.nodeIds.length} 节点
+      </p>
+      <MenuItem
+        icon={<Pencil className="h-3.5 w-3.5" />}
+        label="重命名分组"
+        onClick={() => {
+          const name = window.prompt('重命名分组', group.name)
+          if (name && name.trim()) {
+            useCanvasStore.getState().renameGroup(group.id, name.trim())
+          }
+          closeMenu()
+        }}
+      />
+      <div className="flex items-center gap-1.5 px-3 py-1.5">
+        <span className="text-[10px] text-zinc-500">颜色</span>
+        <span className="flex items-center gap-1">
+          {GROUP_COLORS.map((c) => (
+            <button
+              key={c.key}
+              onClick={() => useCanvasStore.getState().setGroupColor(group.id, c.key)}
+              className={cn(
+                'h-3.5 w-3.5 rounded-full border transition hover:scale-110',
+                c.dot,
+                group.color === c.key
+                  ? 'border-white/80 ring-1 ring-white/40'
+                  : 'border-transparent',
+              )}
+              title={c.label}
+            />
+          ))}
+        </span>
+      </div>
+      <div className="mx-2 my-0.5 h-px bg-zinc-800" />
+      <MenuItem
+        icon={<UngroupIcon className="h-3.5 w-3.5 text-zinc-300" />}
+        label="解组（保留节点）"
+        onClick={() => {
+          useCanvasStore.getState().ungroup(group.id)
+          closeMenu()
+        }}
+      />
+      <MenuItem
+        icon={<Trash2 className="h-3.5 w-3.5 text-rose-300" />}
+        label="删除分组与全部成员"
+        danger
+        onClick={() => {
+          if (
+            window.confirm(
+              `确定删除分组「${group.name}」及其 ${group.nodeIds.length} 个节点？可用撤销恢复。`,
+            )
+          ) {
+            useCanvasStore.getState().deleteGroupAndNodes(group.id)
+          }
+          closeMenu()
+        }}
+      />
+    </>
   )
 }

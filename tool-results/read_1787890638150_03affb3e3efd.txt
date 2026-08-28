@@ -1,0 +1,826 @@
+     1→/**
+     2→ * 节点执行引擎（服务端）
+     3→ * 负责调用 z-ai-web-dev-sdk 完成图像 / 视频 / LLM 生成，并落盘产物
+     4→ */
+     5→import fs from 'fs/promises'
+     6→import path from 'path'
+     7→import { execFile, spawn } from 'child_process'
+     8→import { promisify } from 'util'
+     9→import ZAI from 'z-ai-web-dev-sdk'
+    10→import { db } from '@/lib/db'
+    11→
+    12→const execFileAsync = promisify(execFile)
+    13→
+    14→const GEN_DIR = path.join(process.cwd(), 'public', 'generated')
+    15→const UPLOAD_DIR = path.join(process.cwd(), 'public', 'uploads')
+    16→
+    17→export async function ensureDirs() {
+    18→  await fs.mkdir(GEN_DIR, { recursive: true })
+    19→  await fs.mkdir(UPLOAD_DIR, { recursive: true })
+    20→}
+    21→
+    22→async function saveBase64Image(base64: string): Promise<string> {
+    23→  await ensureDirs()
+    24→  const raw = base64.includes(',') ? base64.split(',')[1] : base64
+    25→  const file = `img_${Date.now().toString(36)}_${Math.random()
+    26→    .toString(36)
+    27→    .slice(2, 8)}.png`
+    28→  await fs.writeFile(path.join(GEN_DIR, file), Buffer.from(raw, 'base64'))
+    29→  return `/generated/${file}`
+    30→}
+    31→
+    32→async function downloadTo(url: string, ext: string): Promise<string> {
+    33→  await ensureDirs()
+    34→  const file = `${ext}_${Date.now().toString(36)}_${Math.random()
+    35→    .toString(36)
+    36→    .slice(2, 8)}.${ext === 'video' ? 'mp4' : 'png'}`
+    37→  const res = await fetch(url)
+    38→  if (!res.ok) throw new Error(`资源下载失败: HTTP ${res.status}`)
+    39→  const buf = Buffer.from(await res.arrayBuffer())
+    40→  const dir = ext === 'video' ? GEN_DIR : GEN_DIR
+    41→  await fs.writeFile(path.join(dir, file), buf)
+    42→  return `/generated/${file}`
+    43→}
+    44→
+    45→/** 将输入图像（本地路径 / dataURL / 远程 URL）统一转为纯 base64 */
+    46→async function imageToBase64(url?: string): Promise<string> {
+    47→  if (!url) throw new Error('缺少图像输入')
+    48→  if (url.startsWith('data:')) return url.split(',')[1]
+    49→  if (url.startsWith('/')) {
+    50→    const filePath = path.join(process.cwd(), 'public', url)
+    51→    const buf = await fs.readFile(filePath)
+    52→    return buf.toString('base64')
+    53→  }
+    54→  const res = await fetch(url)
+    55→  if (!res.ok) throw new Error(`图像获取失败: HTTP ${res.status}`)
+    56→  return Buffer.from(await res.arrayBuffer()).toString('base64')
+    57→}
+    58→
+    59→export interface ExecIO {
+    60→  inputs: Record<string, { kind: string; url?: string; text?: string }>
+    61→  params: Record<string, unknown>
+    62→}
+    63→
+    64→type ProgressFn = (stage: string, progress: number) => void
+    65→
+    66→const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+    67→
+    68→/**
+    69→ * 瞬时错误（限流 / 服务端抖动）自动重试：
+    70→ * 并行执行时多个节点同时发起请求，容易触发上游 429，此处带退避地重试。
+    71→ */
+    72→async function withRetry<T>(
+    73→  fn: () => Promise<T>,
+    74→  opts: {
+    75→    retries?: number
+    76→    baseDelay?: number
+    77→    label?: string
+    78→    onRetry?: (stage: string, progress: number) => void
+    79→  } = {},
+    80→): Promise<T> {
+    81→  const retries = opts.retries ?? 2
+    82→  const baseDelay = opts.baseDelay ?? 2500
+    83→  let lastErr: unknown
+    84→  for (let attempt = 0; attempt <= retries; attempt++) {
+    85→    try {
+    86→      return await fn()
+    87→    } catch (err) {
+    88→      lastErr = err
+    89→      const msg = err instanceof Error ? err.message : String(err)
+    90→      const transient =
+    91→        /429|rate.?limit|too many requests|5\d{2}|bad gateway|service unavailable/i.test(msg)
+    92→      if (!transient || attempt === retries) throw err
+    93→      const delay = baseDelay * (attempt + 1)
+    94→      opts.onRetry?.(
+    95→        `${opts.label ?? '请求'}受限，${Math.round(delay / 1000)}s 后自动重试（${attempt + 1}/${retries}）…`,
+    96→        20,
+    97→      )
+    98→      await sleep(delay)
+    99→    }
+   100→  }
+   101→  throw lastErr as Error
+   102→}
+   103→
+   104→/** 将 16bit PCM 裸流包装为可播放的 WAV 文件 */
+   105→function pcmToWav(
+   106→  pcm: Buffer,
+   107→  sampleRate = 24000,
+   108→  channels = 1,
+   109→  bitsPerSample = 16,
+   110→): Buffer {
+   111→  const header = Buffer.alloc(44)
+   112→  const byteRate = (sampleRate * channels * bitsPerSample) / 8
+   113→  const blockAlign = (channels * bitsPerSample) / 8
+   114→  header.write('RIFF', 0)
+   115→  header.writeUInt32LE(36 + pcm.length, 4)
+   116→  header.write('WAVE', 8)
+   117→  header.write('fmt ', 12)
+   118→  header.writeUInt32LE(16, 16)
+   119→  header.writeUInt16LE(1, 20) // PCM
+   120→  header.writeUInt16LE(channels, 22)
+   121→  header.writeUInt32LE(sampleRate, 24)
+   122→  header.writeUInt32LE(byteRate, 28)
+   123→  header.writeUInt16LE(blockAlign, 32)
+   124→  header.writeUInt16LE(bitsPerSample, 34)
+   125→  header.write('data', 36)
+   126→  header.writeUInt32LE(pcm.length, 40)
+   127→  return Buffer.concat([header, pcm])
+   128→}
+   129→
+   130→function num(params: Record<string, unknown>, key: string): number | undefined {
+   131→  const v = params[key]
+   132→  if (typeof v === 'number' && Number.isFinite(v)) return v
+   133→  if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) {
+   134→    return Number(v)
+   135→  }
+   136→  return undefined
+   137→}
+   138→
+   139→async function saveBuffer(buf: Buffer, ext: string): Promise<string> {
+   140→  await ensureDirs()
+   141→  const file = `aud_${Date.now().toString(36)}_${Math.random()
+   142→    .toString(36)
+   143→    .slice(2, 8)}.${ext}`
+   144→  await fs.writeFile(path.join(GEN_DIR, file), buf)
+   145→  return `/generated/${file}`
+   146→}
+   147→
+   148→function str(params: Record<string, unknown>, key: string): string {
+   149→  const v = params[key]
+   150→  return typeof v === 'string' ? v.trim() : ''
+   151→}
+   152→
+   153→function bool(params: Record<string, unknown>, key: string): boolean {
+   154→  return params[key] === true || params[key] === 'true'
+   155→}
+   156→
+   157→/* ------------------------------ 媒体工具（ffmpeg） ------------------------------ */
+   158→
+   159→/** 将媒体 URL（本地路径 / 远程地址）解析为服务端本地文件路径 */
+   160→async function resolveMediaPath(
+   161→  url: string,
+   162→  kind: 'video' | 'audio',
+   163→): Promise<string> {
+   164→  if (url.startsWith('/')) {
+   165→    return path.join(process.cwd(), 'public', url)
+   166→  }
+   167→  await ensureDirs()
+   168→  const file = `dl_${Date.now().toString(36)}_${Math.random()
+   169→    .toString(36)
+   170→    .slice(2, 8)}.${kind === 'video' ? 'mp4' : 'wav'}`
+   171→  const res = await fetch(url)
+   172→  if (!res.ok) throw new Error(`媒体下载失败: HTTP ${res.status}`)
+   173→  const buf = Buffer.from(await res.arrayBuffer())
+   174→  await fs.writeFile(path.join(GEN_DIR, file), buf)
+   175→  return path.join(GEN_DIR, file)
+   176→}
+   177→
+   178→interface MediaInfo {
+   179→  hasAudio: boolean
+   180→  duration: number
+   181→  width?: number
+   182→  height?: number
+   183→}
+   184→
+   185→/** 使用 ffprobe 读取媒体信息（失败时给出宽松默认值） */
+   186→async function probeMedia(file: string): Promise<MediaInfo> {
+   187→  try {
+   188→    const { stdout } = await execFileAsync('ffprobe', [
+   189→      '-v', 'error',
+   190→      '-print_format', 'json',
+   191→      '-show_format',
+   192→      '-show_streams',
+   193→      file,
+   194→    ])
+   195→    const j = JSON.parse(stdout) as {
+   196→      streams?: { codec_type?: string; width?: number; height?: number }[]
+   197→      format?: { duration?: string }
+   198→    }
+   199→    const videoStream = j.streams?.find((s) => s.codec_type === 'video')
+   200→    return {
+   201→      hasAudio: (j.streams ?? []).some((s) => s.codec_type === 'audio'),
+   202→      duration: Number(j.format?.duration ?? 0) || 0,
+   203→      width: videoStream?.width,
+   204→      height: videoStream?.height,
+   205→    }
+   206→  } catch {
+   207→    return { hasAudio: true, duration: 0 }
+   208→  }
+   209→}
+   210→
+   211→const fmtSec = (s: number) => `${Math.round(s * 10) / 10}s`
+   212→
+   213→/** 运行 ffmpeg，解析 stderr time= 汇报进度 */
+   214→function runFfmpeg(
+   215→  args: string[],
+   216→  total: number,
+   217→  onProgress: ProgressFn,
+   218→): Promise<void> {
+   219→  return new Promise((resolve, reject) => {
+   220→    const p = spawn('ffmpeg', ['-hide_banner', '-y', ...args])
+   221→    let lastEmit = 0
+   222→    let errTail = ''
+   223→    p.stderr.on('data', (d) => {
+   224→      const s = String(d)
+   225→      errTail = (errTail + s).slice(-4000)
+   226→      const m = s.match(/time=(\d+):(\d+):(\d+(?:\.\d+)?)/)
+   227→      if (m && total > 0) {
+   228→        const sec = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3])
+   229→        const now = Date.now()
+   230→        if (now - lastEmit > 800) {
+   231→          lastEmit = now
+   232→          onProgress(
+   233→            `正在合成… ${fmtSec(sec)} / ${fmtSec(total)}`,
+   234→            Math.min(96, Math.round(10 + (sec / total) * 85)),
+   235→          )
+   236→        }
+   237→      }
+   238→    })
+   239→    p.on('error', reject)
+   240→    p.on('close', (code) => {
+   241→      if (code === 0) return resolve()
+   242→      const tail = errTail
+   243→        .split('\n')
+   244→        .filter((l) => l.trim())
+   245→        .slice(-2)
+   246→        .join(' ')
+   247→      reject(new Error(`ffmpeg 合成失败（code ${code}）：${tail}`))
+   248→    })
+   249→  })
+   250→}
+   251→
+   252→/* ------------------------------ 成片合成（音视频混流） ------------------------------ */
+   253→
+   254→async function runAvMerge(
+   255→  io: ExecIO,
+   256→  onProgress: ProgressFn,
+   257→): Promise<Record<string, { kind: string; url?: string; text?: string }>> {
+   258→  const videoUrl = io.inputs.video?.url
+   259→  const audioUrl = io.inputs.audio?.url
+   260→  if (!videoUrl) throw new Error('缺少视频输入：请连接上游视频节点')
+   261→  if (!audioUrl) throw new Error('缺少音频输入：请连接配音 / 音频节点')
+   262→  const keepOriginal = bool(io.params, 'keepOriginal')
+   263→  const vVol = num(io.params, 'videoVolume') ?? 1
+   264→  const aVol = num(io.params, 'audioVolume') ?? 1
+   265→  const durationMode = str(io.params, 'durationMode') || 'video'
+   266→
+   267→  onProgress('正在读取媒体…', 6)
+   268→  const videoPath = await resolveMediaPath(videoUrl, 'video')
+   269→  const audioPath = await resolveMediaPath(audioUrl, 'audio')
+   270→
+   271→  onProgress('正在分析音视频…', 14)
+   272→  const vInfo = await probeMedia(videoPath)
+   273→  const aInfo = await probeMedia(audioPath)
+   274→  const target =
+   275→    durationMode === 'video'
+   276→      ? vInfo.duration || aInfo.duration
+   277→      : aInfo.duration || vInfo.duration
+   278→
+   279→  // 是否需要延长视频画面（clone 最后一帧，需重编码）
+   280→  const needVideoPad =
+   281→    durationMode === 'audio' &&
+   282→    target > 0 &&
+   283→    vInfo.duration > 0 &&
+   284→    aInfo.duration > vInfo.duration + 0.05
+   285→  const videoReencode = needVideoPad
+   286→
+   287→  const filterParts: string[] = []
+   288→  if (needVideoPad) {
+   289→    const pad = (target - vInfo.duration + 0.2).toFixed(2)
+   290→    filterParts.push(`[0:v]tpad=stop_mode=clone:stop_duration=${pad}[vout]`)
+   291→  }
+   292→  const mix = keepOriginal && vInfo.hasAudio
+   293→  if (mix) {
+   294→    const padExpr = target > 0 ? `apad=whole_dur=${target.toFixed(2)}` : 'apad'
+   295→    filterParts.push(`[0:a]volume=${vVol},${padExpr}[a0]`)
+   296→    filterParts.push(`[1:a]volume=${aVol},${padExpr}[a1]`)
+   297→    filterParts.push(
+   298→      `[a0][a1]amix=inputs=2:duration=longest:normalize=0[aout]`,
+   299→    )
+   300→  }
+   301→
+   302→  const args: string[] = ['-i', videoPath, '-i', audioPath]
+   303→  if (filterParts.length > 0) args.push('-filter_complex', filterParts.join(';'))
+   304→  args.push('-map', needVideoPad ? '[vout]' : '0:v')
+   305→  if (mix) {
+   306→    args.push('-map', '[aout]')
+   307→  } else {
+   308→    args.push('-map', '1:a')
+   309→    const padExpr = target > 0 ? `apad=whole_dur=${target.toFixed(2)}` : 'apad'
+   310→    args.push('-af', `volume=${aVol},${padExpr}`)
+   311→  }
+   312→  if (videoReencode) {
+   313→    args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p')
+   314→  } else {
+   315→    args.push('-c:v', 'copy')
+   316→  }
+   317→  args.push(
+   318→    '-c:a', 'aac', '-b:a', '192k',
+   319→    '-shortest',
+   320→    '-movflags', '+faststart',
+   321→  )
+   322→
+   323→  const outName = `merge_${Date.now().toString(36)}_${Math.random()
+   324→    .toString(36)
+   325→    .slice(2, 8)}.mp4`
+   326→  const outPath = path.join(GEN_DIR, outName)
+   327→  args.push(outPath)
+   328→
+   329→  onProgress('开始合成…', 10)
+   330→  await runFfmpeg(args, target, onProgress)
+   331→
+   332→  onProgress('正在保存成片…', 96)
+   333→  const url = `/generated/${outName}`
+   334→  const poster = await makePoster(url)
+   335→  const outInfo = await probeMedia(outPath)
+   336→  const meta: Record<string, string | number> = {
+   337→    duration: fmtSec(outInfo.duration || target),
+   338→    mixed: mix ? 1 : 0,
+   339→  }
+   340→  if (outInfo.width && outInfo.height) {
+   341→    meta.resolution = `${outInfo.width}x${outInfo.height}`
+   342→  }
+   343→  if (poster) meta.poster = poster
+   344→  return {
+   345→    video: { kind: 'video', url, meta },
+   346→  }
+   347→}
+   348→
+   349→/* ------------------------------ LLM 提示词优化 ------------------------------ */
+   350→
+   351→const STYLE_HINT: Record<string, string> = {
+   352→  auto: '忠实扩写用户的想法，适度补充视觉细节',
+   353→  cinematic: '电影质感：运镜、光线、景深、胶片色调',
+   354→  photoreal: '写实摄影：真实光影、镜头参数、自然细节',
+   355→  anime: '日式动漫：鲜明的赛璐璐质感与色彩',
+   356→  '3d': '3D 渲染：CGI 质感、物理光照、材质细节',
+   357→  ink: '水墨国风：留白意境、水墨晕染、东方美学',
+   358→  cyberpunk: '赛博朋克：霓虹光效、未来都市、高对比',
+   359→}
+   360→
+   361→function buildEnhancePrompt(text: string, style: string, target: string) {
+   362→  const styleHint = STYLE_HINT[style] ?? STYLE_HINT.auto
+   363→  const targetHint =
+   364→    target === 'image'
+   365→      ? '静态图像生成模型'
+   366→      : '视频生成模型（请描述主体、动作、运镜与氛围）'
+   367→  return [
+   368→    `你是一名顶级的 AI 视频/图像提示词工程师。`,
+   369→    `请将下面这段简短创意扩写为一段适合${targetHint}的高质量中文提示词。`,
+   370→    `风格要求：${styleHint}。`,
+   371→    `要求：1) 保留用户原意 2) 补充主体细节、场景、光线、构图、风格关键词 3) 输出 60~150 字的纯提示词文本，不要任何解释、引号或前缀。`,
+   372→    ``,
+   373→    `用户创意：${text}`,
+   374→  ].join('\n')
+   375→}
+   376→
+   377→async function runEnhancer(
+   378→  io: ExecIO,
+   379→  onProgress: ProgressFn,
+   380→): Promise<Record<string, { kind: string; text?: string; url?: string }>> {
+   381→  const text =
+   382→    io.inputs.text?.text ??
+   383→    (typeof io.params.fallbackText === 'string' ? io.params.fallbackText : '')
+   384→  if (!text?.trim()) throw new Error('请先在左侧连接一个提示词节点或输入文本')
+   385→  const style = str(io.params, 'style') || 'auto'
+   386→  const target = str(io.params, 'target') || 'video'
+   387→  onProgress('正在分析创意…', 20)
+   388→  const zai = await ZAI.create()
+   389→  const res = (await withRetry(
+   390→    () =>
+   391→      zai.chat.completions.create({
+   392→        messages: [
+   393→          {
+   394→            role: 'system',
+   395→            content:
+   396→              '你是专业的 AI 视频提示词工程师，只输出扩写后的提示词本身，不要任何多余内容。',
+   397→          },
+   398→          { role: 'user', content: buildEnhancePrompt(text, style, target) },
+   399→        ],
+   400→      }),
+   401→    { label: '提示词优化', onRetry: onProgress },
+   402→  )) as {
+   403→    choices?: { message?: { content?: string } }[]
+   404→    content?: string
+   405→  }
+   406→  onProgress('正在整理提示词…', 80)
+   407→  const out =
+   408→    res?.choices?.[0]?.message?.content ?? res?.content ?? String(res ?? '')
+   409→  const cleaned = String(out)
+   410→    .replace(/^["'「『]|["'」』]$/g, '')
+   411→    .trim()
+   412→  if (!cleaned) throw new Error('LLM 未返回有效内容')
+   413→  return { text: { kind: 'text', text: cleaned } }
+   414→}
+   415→
+   416→/* --------------------------------- 图像生成 --------------------------------- */
+   417→
+   418→async function runImageGen(
+   419→  io: ExecIO,
+   420→  onProgress: ProgressFn,
+   421→): Promise<Record<string, { kind: string; url?: string; text?: string }>> {
+   422→  const prompt = str(io.params, 'prompt') || io.inputs.text?.text || ''
+   423→  if (!prompt) throw new Error('缺少提示词：请连接提示词节点或在节点内填写')
+   424→  const size = str(io.params, 'size') || '1024x576'
+   425→  onProgress('正在构思画面…', 15)
+   426→  const zai = await ZAI.create()
+   427→  const res = await withRetry(
+   428→    () => zai.images.generations.create({ prompt, size: size as '1024x1024' }),
+   429→    { label: '图像生成', onRetry: onProgress },
+   430→  )
+   431→  const b64 = res?.data?.[0]?.base64
+   432→  if (!b64) throw new Error('图像生成结果为空')
+   433→  onProgress('正在保存图像…', 85)
+   434→  const url = await saveBase64Image(b64)
+   435→  return {
+   436→    image: { kind: 'image', url, meta: { model: 'cogview', size } },
+   437→  }
+   438→}
+   439→
+   440→async function runImageEdit(
+   441→  io: ExecIO,
+   442→  onProgress: ProgressFn,
+   443→): Promise<Record<string, { kind: string; url?: string; text?: string }>> {
+   444→  const prompt = str(io.params, 'prompt') || io.inputs.text?.text || ''
+   445→  if (!prompt) throw new Error('缺少提示词：请描述想要的改动')
+   446→  if (!io.inputs.image?.url) throw new Error('缺少图像输入：请连接上游图像')
+   447→  const size = str(io.params, 'size')
+   448→  onProgress('正在读取原图…', 15)
+   449→  const base64 = await imageToBase64(io.inputs.image.url)
+   450→  onProgress('AI 重绘中…', 35)
+   451→  const zai = await ZAI.create()
+   452→  const res = await withRetry(
+   453→    () =>
+   454→      zai.images.generations.edit({
+   455→        prompt,
+   456→        image: base64,
+   457→        ...(size && size !== 'auto' ? { size: size as '1024x1024' } : {}),
+   458→      }),
+   459→    { label: '图像重绘', onRetry: onProgress },
+   460→  )
+   461→  const b64 = res?.data?.[0]?.base64
+   462→  if (!b64) throw new Error('图像重绘结果为空')
+   463→  onProgress('正在保存图像…', 85)
+   464→  const url = await saveBase64Image(b64)
+   465→  return {
+   466→    image: { kind: 'image', url, meta: { model: 'image-edit' } },
+   467→  }
+   468→}
+   469→
+   470→/* --------------------------------- 视频生成 --------------------------------- */
+   471→
+   472→async function pollVideoTask(
+   473→  zai: Awaited<ReturnType<typeof ZAI.create>>,
+   474→  taskId: string,
+   475→  onProgress: ProgressFn,
+   476→  timeoutMs = 10 * 60 * 1000,
+   477→): Promise<string> {
+   478→  const start = Date.now()
+   479→  let lastStage = ''
+   480→  while (Date.now() - start < timeoutMs) {
+   481→    await sleep(4000)
+   482→    const elapsed = (Date.now() - start) / 1000
+   483→    // 进度按时间估算：约 3 分钟到 90%
+   484→    const est = Math.min(92, Math.round(8 + (elapsed / 180) * 84))
+   485→    const stage = `AI 视频生成中… 已等待 ${Math.round(elapsed)}s`
+   486→    if (stage !== lastStage) {
+   487→      lastStage = stage
+   488→      onProgress(stage, est)
+   489→    }
+   490→    let r
+   491→    try {
+   492→      r = await zai.async.result.query(taskId)
+   493→    } catch {
+   494→      continue // 网络抖动重试
+   495→    }
+   496→    if (r?.task_status === 'SUCCESS') {
+   497→      const url =
+   498→        r.video_result?.[0]?.url || r.video_url || r.url || r.video || ''
+   499→      if (!url) throw new Error('视频任务成功但未返回地址')
+   500→      return url
+   501→    }
+   502→    if (r?.task_status === 'FAIL') {
+   503→      throw new Error('视频生成失败，请调整提示词后重试')
+   504→    }
+   505→  }
+   506→  throw new Error('视频生成超时（10 分钟），请稍后重试或使用极速模式')
+   507→}
+   508→
+   509→async function runTextToVideo(
+   510→  io: ExecIO,
+   511→  onProgress: ProgressFn,
+   512→): Promise<Record<string, { kind: string; url?: string; text?: string }>> {
+   513→  const prompt = str(io.params, 'prompt') || io.inputs.text?.text || ''
+   514→  if (!prompt) throw new Error('缺少提示词：请连接提示词节点或在节点内填写')
+   515→  const quality = str(io.params, 'quality') || 'quality'
+   516→  const withAudio = bool(io.params, 'withAudio')
+   517→  onProgress('正在提交视频任务…', 8)
+   518→  const zai = await ZAI.create()
+   519→  const task = await withRetry(
+   520→    () =>
+   521→      zai.video.generations.create({
+   522→        prompt,
+   523→        quality: quality as 'speed' | 'quality',
+   524→        with_audio: withAudio,
+   525→      }),
+   526→    { label: '视频任务提交', onRetry: onProgress },
+   527→  )
+   528→  const remoteUrl = await pollVideoTask(zai, task.id, onProgress)
+   529→  onProgress('正在下载视频…', 93)
+   530→  const url = await downloadTo(remoteUrl, 'video')
+   531→  const poster = await makePoster(url)
+   532→  const meta: Record<string, string | number> = { quality, withAudio: withAudio ? 1 : 0 }
+   533→  if (poster) meta.poster = poster
+   534→  return {
+   535→    video: { kind: 'video', url, meta },
+   536→  }
+   537→}
+   538→
+   539→async function runImageToVideo(
+   540→  io: ExecIO,
+   541→  onProgress: ProgressFn,
+   542→): Promise<Record<string, { kind: string; url?: string; text?: string }>> {
+   543→  if (!io.inputs.image?.url) throw new Error('缺少图像输入：请连接上游图像')
+   544→  const prompt = str(io.params, 'prompt') || io.inputs.text?.text || ''
+   545→  const quality = str(io.params, 'quality') || 'quality'
+   546→  const withAudio = bool(io.params, 'withAudio')
+   547→  onProgress('正在读取图像…', 6)
+   548→  const b64 = await imageToBase64(io.inputs.image.url)
+   549→  onProgress('正在提交视频任务…', 10)
+   550→  const zai = await ZAI.create()
+   551→  const task = await withRetry(
+   552→    () =>
+   553→      zai.video.generations.create({
+   554→        prompt: prompt || undefined,
+   555→        image_url: `data:image/png;base64,${b64}`,
+   556→        quality: quality as 'speed' | 'quality',
+   557→        with_audio: withAudio,
+   558→      }),
+   559→    { label: '视频任务提交', onRetry: onProgress },
+   560→  )
+   561→  const remoteUrl = await pollVideoTask(zai, task.id, onProgress)
+   562→  onProgress('正在下载视频…', 93)
+   563→  const url = await downloadTo(remoteUrl, 'video')
+   564→  const poster = await makePoster(url)
+   565→  const meta: Record<string, string | number> = { quality, withAudio: withAudio ? 1 : 0 }
+   566→  if (poster) meta.poster = poster
+   567→  return {
+   568→    video: { kind: 'video', url, meta },
+   569→  }
+   570→}
+   571→
+   572→/* ------------------------------ 视频拼接（多段顺序拼接 + 转场） ------------------------------ */
+   573→
+   574→const XFADE_TRANSITIONS = new Set(['fade', 'wipeleft', 'slideup', 'circleopen'])
+   575→
+   576→async function runConcat(
+   577→  io: ExecIO,
+   578→  onProgress: ProgressFn,
+   579→): Promise<Record<string, { kind: string; url?: string; text?: string }>> {
+   580→  const order = ['v1', 'v2', 'v3', 'v4']
+   581→  const urls = order
+   582→    .map((k) => io.inputs[k]?.url)
+   583→    .filter((u): u is string => !!u)
+   584→  if (urls.length < 2) {
+   585→    throw new Error('至少需要连接两段视频（段 1 与 段 2）')
+   586→  }
+   587→  const transition = str(io.params, 'transition') || 'none'
+   588→  const useFade = XFADE_TRANSITIONS.has(transition)
+   589→  const fitMode = str(io.params, 'fitMode') || 'pad'
+   590→
+   591→  onProgress('正在读取视频片段…', 5)
+   592→  const paths: string[] = []
+   593→  const infos: MediaInfo[] = []
+   594→  for (let i = 0; i < urls.length; i++) {
+   595→    const p = await resolveMediaPath(urls[i], 'video')
+   596→    const info = await probeMedia(p)
+   597→    if (!info.duration || info.duration <= 0) {
+   598→      throw new Error(`第 ${i + 1} 段视频时长读取失败，无法拼接`)
+   599→    }
+   600→    paths.push(p)
+   601→    infos.push(info)
+   602→    onProgress(
+   603→      `正在读取视频片段… ${i + 1}/${urls.length}`,
+   604→      5 + Math.round(((i + 1) / urls.length) * 12),
+   605→    )
+   606→  }
+   607→
+   608→  // 目标画幅：以首段为准（宽高取偶）
+   609→  const evenize = (n: number | undefined, fb: number) => {
+   610→    const v = n && n > 0 ? Math.round(n) : fb
+   611→    return v % 2 === 0 ? v : v - 1
+   612→  }
+   613→  const W = evenize(infos[0].width, 1024)
+   614→  const H = evenize(infos[0].height, 576)
+   615→  const FPS = 30
+   616→
+   617→  // 转场时长不能超过最短片段
+   618→  const minDur = Math.min(...infos.map((i) => i.duration))
+   619→  const fadeDur = Math.min(
+   620→    Math.max(0.2, num(io.params, 'transitionDuration') ?? 0.5),
+   621→    Math.max(0.2, minDur - 0.3),
+   622→  )
+   623→
+   624→  // 输入注册（无音轨的片段补静音轨）
+   625→  const args: string[] = []
+   626→  let inputIdx = 0
+   627→  const segs = paths.map((p, i) => {
+   628→    const videoIdx = inputIdx++
+   629→    args.push('-i', p)
+   630→    let audioIdx: number | null = null
+   631→    if (!infos[i].hasAudio) {
+   632→      args.push('-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo')
+   633→      audioIdx = inputIdx++
+   634→    }
+   635→    return { videoIdx, audioIdx, dur: infos[i].duration }
+   636→  })
+   637→
+   638→  // 逐段归一化（同分辨率 / 帧率 / 像素格式，音轨重采样并裁齐片段时长）
+   639→  const filter: string[] = []
+   640→  segs.forEach((s, i) => {
+   641→    const dur = s.dur.toFixed(2)
+   642→    // 注意：setpts 必须在 fps 之前，否则帧率元数据变为 1/0，xfade 会拒绝 CFR 校验
+   643→    const vChain =
+   644→      fitMode === 'crop'
+   645→        ? `scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1,setpts=PTS-STARTPTS,fps=${FPS},format=yuv420p`
+   646→        : `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2,setsar=1,setpts=PTS-STARTPTS,fps=${FPS},format=yuv420p`
+   647→    filter.push(`[${s.videoIdx}:v]${vChain}[v${i}]`)
+   648→    if (s.audioIdx !== null) {
+   649→      filter.push(`[${s.audioIdx}:a]atrim=0:${dur},asetpts=PTS-STARTPTS[a${i}]`)
+   650→    } else {
+   651→      filter.push(
+   652→        `[${s.videoIdx}:a]aresample=44100,aformat=sample_rates=44100:channel_layouts=stereo,atrim=0:${dur},asetpts=PTS-STARTPTS[a${i}]`,
+   653→      )
+   654→    }
+   655→  })
+   656→
+   657→  const total: number =
+   658→    useFade
+   659→      ? segs.reduce((a, s) => a + s.dur, 0) - fadeDur * (segs.length - 1)
+   660→      : segs.reduce((a, s) => a + s.dur, 0)
+   661→
+   662→  let vOut = 'v0'
+   663→  let aOut = 'a0'
+   664→  if (!useFade) {
+   665→    const concatInputs = segs.map((_, i) => `[v${i}][a${i}]`).join('')
+   666→    filter.push(`${concatInputs}concat=n=${segs.length}:v=1:a=1[vout][aout]`)
+   667→    vOut = 'vout'
+   668→    aOut = 'aout'
+   669→  } else {
+   670→    // xfade / acrossfade 转场链
+   671→    let acc = segs[0].dur
+   672→    for (let i = 1; i < segs.length; i++) {
+   673→      const offset = Math.max(0, acc - fadeDur)
+   674→      filter.push(
+   675→        `[${vOut}][v${i}]xfade=transition=${transition}:duration=${fadeDur.toFixed(2)}:offset=${offset.toFixed(2)}[vx${i}]`,
+   676→      )
+   677→      filter.push(`[${aOut}][a${i}]acrossfade=d=${fadeDur.toFixed(2)}[ax${i}]`)
+   678→      vOut = `vx${i}`
+   679→      aOut = `ax${i}`
+   680→      acc = acc + segs[i].dur - fadeDur
+   681→    }
+   682→  }
+   683→
+   684→  args.push('-filter_complex', filter.join(';'))
+   685→  args.push('-map', `[${vOut}]`, '-map', `[${aOut}]`)
+   686→  // 快速预览档：superfast + 高 CRF，速度优先（约 2 倍速）；正式出片用 veryfast + crf20
+   687→  const fast = bool(io.params, 'fastPreview')
+   688→  args.push(
+   689→    '-c:v', 'libx264',
+   690→    '-preset', fast ? 'superfast' : 'veryfast',
+   691→    '-crf', fast ? '28' : '20',
+   692→    '-pix_fmt', 'yuv420p',
+   693→    '-c:a', 'aac', '-b:a', '192k',
+   694→    '-movflags', '+faststart',
+   695→  )
+   696→
+   697→  const outName = `concat_${Date.now().toString(36)}_${Math.random()
+   698→    .toString(36)
+   699→    .slice(2, 8)}.mp4`
+   700→  const outPath = path.join(GEN_DIR, outName)
+   701→  args.push(outPath)
+   702→
+   703→  onProgress(useFade ? '正在拼接（含转场渲染）…' : '正在拼接片段…', 18)
+   704→  await runFfmpeg(args, total, onProgress)
+   705→
+   706→  onProgress('正在保存成片…', 96)
+   707→  const url = `/generated/${outName}`
+   708→  const poster = await makePoster(url)
+   709→  const outInfo = await probeMedia(outPath)
+   710→  const meta: Record<string, string | number> = {
+   711→    duration: fmtSec(outInfo.duration || total),
+   712→    segments: segs.length,
+   713→    transition: useFade ? transition : 'cut',
+   714→    quality: fast ? 'preview' : 'final',
+   715→  }
+   716→  if (outInfo.width && outInfo.height) {
+   717→    meta.resolution = `${outInfo.width}x${outInfo.height}`
+   718→  }
+   719→  if (poster) meta.poster = poster
+   720→  return { video: { kind: 'video', url, meta } }
+   721→}
+   722→
+   723→/** 为视频生成首帧海报（poster），失败时静默返回 undefined */
+   724→async function makePoster(videoUrl: string): Promise<string | undefined> {
+   725→  try {
+   726→    await ensureDirs()
+   727→    const src = videoUrl.startsWith('/')
+   728→      ? path.join(process.cwd(), 'public', videoUrl)
+   729→      : videoUrl
+   730→    const name = `poster_${Date.now().toString(36)}_${Math.random()
+   731→      .toString(36)
+   732→      .slice(2, 8)}.jpg`
+   733→    const out = path.join(GEN_DIR, name)
+   734→    const tryRun = (seek: string[]) =>
+   735→      new Promise<void>((resolve, reject) => {
+   736→        spawn(
+   737→          'ffmpeg',
+   738→          ['-hide_banner', '-y', ...seek, '-i', src, '-frames:v', '1', '-q:v', '4', out],
+   739→        )
+   740→          .on('error', reject)
+   741→          .on('close', (c) => (c === 0 ? resolve() : reject(new Error('poster failed'))))
+   742→      })
+   743→    try {
+   744→      await tryRun(['-ss', '0.1'])
+   745→    } catch {
+   746→      await tryRun([])
+   747→    }
+   748→    const st = await fs.stat(out).catch(() => null)
+   749→    if (!st || st.size === 0) return undefined
+   750→    return `/generated/${name}`
+   751→  } catch {
+   752→    return undefined
+   753→  }
+   754→}
+   755→
+   756→/* --------------------------------- 语音合成 --------------------------------- */
+   757→
+   758→async function runTTS(
+   759→  io: ExecIO,
+   760→  onProgress: ProgressFn,
+   761→): Promise<Record<string, { kind: string; url?: string; text?: string }>> {
+   762→  const text =
+   763→    str(io.params, 'fallbackText') || io.inputs.text?.text || ''
+   764→  if (!text) throw new Error('缺少文案：请连接提示词节点或在节点内填写')
+   765→  const voiceRaw = str(io.params, 'voice')
+   766→  const voice = voiceRaw && voiceRaw !== 'default-voice' ? voiceRaw : undefined
+   767→  const speed = num(io.params, 'speed')
+   768→  onProgress('正在合成语音…', 30)
+   769→  const zai = await ZAI.create()
+   770→  const res = await withRetry(
+   771→    () =>
+   772→      zai.audio.tts.create({
+   773→        input: text,
+   774→        ...(voice ? { voice } : {}),
+   775→        ...(speed ? { speed } : {}),
+   776→      }),
+   777→    { label: '语音合成', onRetry: onProgress },
+   778→  )
+   779→  onProgress('正在封装音频…', 80)
+   780→  const arrayBuffer = await res.arrayBuffer()
+   781→  const raw = Buffer.from(arrayBuffer)
+   782→  if (raw.length === 0) throw new Error('语音合成结果为空')
+   783→  // API 返回 PCM 裸流（24kHz 16bit mono），包装为 WAV
+   784→  const isWav = raw.length > 44 && raw.slice(0, 4).toString() === 'RIFF'
+   785→  const url = await saveBuffer(
+   786→    isWav ? raw : pcmToWav(raw),
+   787→    'wav',
+   788→  )
+   789→  return {
+   790→    audio: {
+   791→      kind: 'audio',
+   792→      url,
+   793→      meta: { voice: voice ?? 'default', speed: speed ?? 1 },
+   794→    },
+   795→  }
+   796→}
+   797→
+   798→/* --------------------------------- 统一入口 --------------------------------- */
+   799→
+   800→export async function executeNode(
+   801→  nodeType: string,
+   802→  io: ExecIO,
+   803→  onProgress: ProgressFn,
+   804→): Promise<Record<string, { kind: string; url?: string; text?: string }>> {
+   805→  switch (nodeType) {
+   806→    case 'enhancer':
+   807→      return runEnhancer(io, onProgress)
+   808→    case 'imageGen':
+   809→      return runImageGen(io, onProgress)
+   810→    case 'imageEdit':
+   811→      return runImageEdit(io, onProgress)
+   812→    case 'textToVideo':
+   813→      return runTextToVideo(io, onProgress)
+   814→    case 'imageToVideo':
+   815→      return runImageToVideo(io, onProgress)
+   816→    case 'tts':
+   817→      return runTTS(io, onProgress)
+   818→    case 'avMerge':
+   819→      return runAvMerge(io, onProgress)
+   820→    case 'concat':
+   821→      return runConcat(io, onProgress)
+   822→    default:
+   823→      throw new Error(`节点类型 ${nodeType} 不可执行`)
+   824→  }
+   825→}
+   826→

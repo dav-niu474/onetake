@@ -22,9 +22,11 @@ import {
   type CanvasNodeData,
   type NodeOutput,
   type RunState,
+  GROUP_COLORS,
 } from './types'
 
 let nodeCounter = 0
+let groupCounter = 0
 
 export interface WorkflowMeta {
   id: string | null
@@ -32,9 +34,18 @@ export interface WorkflowMeta {
   updatedAt?: string
 }
 
+/** 节点分组（视觉框，成员仍可独立拖动；拖动分组框则整体平移） */
+export interface CanvasGroup {
+  id: string
+  name: string
+  color: string
+  nodeIds: string[]
+}
+
 interface HistoryEntry {
   nodes: Node<CanvasNodeData>[]
   edges: Edge[]
+  groups: CanvasGroup[]
 }
 
 const HISTORY_LIMIT = 60
@@ -46,10 +57,18 @@ const HISTORY_LIMIT = 60
  */
 const lastRemovalCommit = { at: 0, active: false }
 
+interface GraphPayload {
+  nodes: Node<CanvasNodeData>[]
+  edges: Edge[]
+  groups?: CanvasGroup[]
+}
+
 export interface CanvasStore {
   /* 画布数据 */
   nodes: Node<CanvasNodeData>[]
   edges: Edge[]
+  groups: CanvasGroup[]
+  selectedGroupId: string | null
   selectedNodeId: string | null
 
   /* 历史（撤销/重做） */
@@ -90,6 +109,17 @@ export interface CanvasStore {
   addNode: (type: string, position: { x: number; y: number }) => string
   removeNode: (id: string) => void
   duplicateNode: (id: string) => void
+  /* 分组 */
+  createGroupFromSelection: () => string | null
+  renameGroup: (id: string, name: string) => void
+  setGroupColor: (id: string, color: string) => void
+  ungroup: (id: string) => void
+  deleteGroupAndNodes: (id: string) => void
+  translateNodesTo: (
+    starts: Record<string, { x: number; y: number }>,
+    delta: { x: number; y: number },
+  ) => void
+  setSelectedGroupId: (id: string | null) => void
   updateNodeData: (
     id: string,
     patch: Partial<CanvasNodeData> | ((d: CanvasNodeData) => Partial<CanvasNodeData>),
@@ -106,10 +136,7 @@ export interface CanvasStore {
   setEdges: (edges: Edge[]) => void
 
   setWorkflow: (meta: Partial<WorkflowMeta>) => void
-  loadGraph: (
-    graph: { nodes: Node<CanvasNodeData>[]; edges: Edge[] },
-    meta?: Partial<WorkflowMeta>,
-  ) => void
+  loadGraph: (graph: GraphPayload, meta?: Partial<WorkflowMeta>) => void
   markSaved: (id: string, updatedAt?: string) => void
   setSaving: (v: boolean) => void
   setDirty: (v: boolean) => void
@@ -135,6 +162,8 @@ function makeId() {
 export const useCanvasStore = create<CanvasStore>((set, get) => ({
   nodes: [],
   edges: [],
+  groups: [],
+  selectedGroupId: null,
   selectedNodeId: null,
 
   past: [],
@@ -162,7 +191,11 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
     set((s) => ({
       past: [
         ...s.past.slice(-(HISTORY_LIMIT - 1)),
-        { nodes: structuredClone(s.nodes), edges: structuredClone(s.edges) },
+        {
+          nodes: structuredClone(s.nodes),
+          edges: structuredClone(s.edges),
+          groups: structuredClone(s.groups),
+        },
       ],
       future: [],
     }))
@@ -183,29 +216,37 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
   },
 
   undo: () => {
-    const { past, future, nodes, edges } = get()
+    const { past, future, nodes, edges, groups } = get()
     if (past.length === 0) return
     lastRemovalCommit.active = false
     const prev = past[past.length - 1]
     set({
       past: past.slice(0, -1),
-      future: [...future.slice(-(HISTORY_LIMIT - 1)), { nodes, edges }],
+      future: [
+        ...future.slice(-(HISTORY_LIMIT - 1)),
+        { nodes, edges, groups },
+      ],
       nodes: prev.nodes,
       edges: prev.edges,
+      groups: prev.groups,
       dirty: true,
     })
   },
 
   redo: () => {
-    const { past, future, nodes, edges } = get()
+    const { past, future, nodes, edges, groups } = get()
     if (future.length === 0) return
     lastRemovalCommit.active = false
     const next = future[future.length - 1]
     set({
       future: future.slice(0, -1),
-      past: [...past.slice(-(HISTORY_LIMIT - 1)), { nodes, edges }],
+      past: [
+        ...past.slice(-(HISTORY_LIMIT - 1)),
+        { nodes, edges, groups },
+      ],
       nodes: next.nodes,
       edges: next.edges,
+      groups: next.groups,
       dirty: true,
     })
   },
@@ -291,7 +332,11 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
     }
     set((s) => ({
       nodes: applyNodeChanges(changes, s.nodes),
-      dirty: s.dirty || changes.some((c) => c.type !== 'select'),
+      // dimensions（首渲染测量）与 select 不属于用户编辑，不应触发自动保存，
+      // 否则会产生「打开工作流即自动保存」的回归（每次刷新都 PUT + attach）
+      dirty:
+        s.dirty ||
+        changes.some((c) => c.type !== 'select' && c.type !== 'dimensions'),
     }))
   },
 
@@ -375,6 +420,10 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
     set((s) => ({
       nodes: s.nodes.filter((n) => n.id !== id),
       edges: s.edges.filter((e) => e.source !== id && e.target !== id),
+      // 同步清理分组中的空成员引用
+      groups: s.groups
+        .map((g) => ({ ...g, nodeIds: g.nodeIds.filter((nid) => nid !== id) }))
+        .filter((g) => g.nodeIds.length > 0),
       dirty: true,
       selectedNodeId: s.selectedNodeId === id ? null : s.selectedNodeId,
     }))
@@ -476,6 +525,90 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
       })),
     })),
 
+  /* ---------- 分组 ---------- */
+
+  createGroupFromSelection: () => {
+    const { nodes, groups } = get()
+    const selected = nodes.filter((n) => n.selected)
+    if (selected.length < 2) {
+      get().showToast('info', '请先框选至少 2 个节点再编组（Shift + 点击多选）')
+      return null
+    }
+    get().commit()
+    groupCounter += 1
+    const id = `g_${Date.now().toString(36)}_${groupCounter}`
+    const group: CanvasGroup = {
+      id,
+      name: `分组 ${groups.length + 1}`,
+      color: GROUP_COLORS[groups.length % GROUP_COLORS.length].key,
+      nodeIds: selected.map((n) => n.id),
+    }
+    set({
+      groups: [...groups, group],
+      selectedGroupId: id,
+      dirty: true,
+      // 清除成员节点的 RF 选中态：使 Delete 键仅作用于分组（解组），
+      // 避免「解组 + 删除成员」同时触发的意外破坏性交互
+      nodes: get().nodes.map((n) =>
+        group.nodeIds.includes(n.id) ? { ...n, selected: false } : n,
+      ),
+    })
+    get().showToast('success', `已创建「${group.name}」（${selected.length} 个节点）`)
+    return id
+  },
+
+  renameGroup: (id, name) =>
+    set((s) => ({
+      groups: s.groups.map((g) => (g.id === id ? { ...g, name } : g)),
+      dirty: true,
+    })),
+
+  setGroupColor: (id, color) =>
+    set((s) => ({
+      groups: s.groups.map((g) => (g.id === id ? { ...g, color } : g)),
+      dirty: true,
+    })),
+
+  ungroup: (id) => {
+    const { groups } = get()
+    if (!groups.some((g) => g.id === id)) return
+    get().commit()
+    set({
+      groups: groups.filter((g) => g.id !== id),
+      selectedGroupId: null,
+      dirty: true,
+    })
+  },
+
+  deleteGroupAndNodes: (id) => {
+    const { groups } = get()
+    const g = groups.find((x) => x.id === id)
+    if (!g) return
+    get().commit()
+    const ids = new Set(g.nodeIds)
+    set((s) => ({
+      nodes: s.nodes.filter((n) => !ids.has(n.id)),
+      edges: s.edges.filter((e) => !ids.has(e.source) && !ids.has(e.target)),
+      groups: s.groups.filter((x) => x.id !== id),
+      selectedGroupId: null,
+      dirty: true,
+    }))
+    get().showToast('success', `已删除「${g.name}」及其 ${ids.size} 个节点`)
+  },
+
+  /** 分组框拖拽：按拖拽起点 + 偏移量绝对定位成员（无累积漂移） */
+  translateNodesTo: (starts, delta) =>
+    set((s) => ({
+      nodes: s.nodes.map((n) => {
+        const st = starts[n.id]
+        return st
+          ? { ...n, position: { x: st.x + delta.x, y: st.y + delta.y } }
+          : n
+      }),
+    })),
+
+  setSelectedGroupId: (id) => set({ selectedGroupId: id }),
+
   setEdges: (edges) => set({ edges, dirty: true }),
 
   setWorkflow: (meta) =>
@@ -485,6 +618,8 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
     set((s) => ({
       nodes: graph.nodes ?? [],
       edges: graph.edges ?? [],
+      groups: graph.groups ?? [],
+      selectedGroupId: null,
       past: [],
       future: [],
       clipboard: null,

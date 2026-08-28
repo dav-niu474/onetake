@@ -21,10 +21,12 @@ import {
   Download,
   RefreshCw,
   FileText,
+  RotateCcw,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/lib/ai-canvas/store'
 import { NODE_SPECS } from '@/lib/ai-canvas/types'
+import { runNode } from '@/lib/ai-canvas/executor'
 
 interface HistoryItem {
   id: string
@@ -161,6 +163,25 @@ export function HistoryDialog() {
                       </p>
                     </div>
                     <div className="flex shrink-0 items-center gap-1">
+                      {item.status === 'failed' &&
+                        useCanvasStore
+                          .getState()
+                          .nodes.some((n) => n.id === item.nodeId) && (
+                          <button
+                            onClick={() => {
+                              void runNode(item.nodeId)
+                              useCanvasStore
+                                .getState()
+                                .showToast('info', '已重新提交该节点执行')
+                              setTimeout(() => void refresh(), 2500)
+                            }}
+                            className="flex h-6 items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-1.5 text-[9px] text-amber-200 transition hover:bg-amber-500/20"
+                            title="重跑该节点"
+                          >
+                            <RotateCcw className="h-3 w-3" />
+                            重跑
+                          </button>
+                        )}
                       {outputs.map((o, i) =>
                         o.url ? (
                           <a

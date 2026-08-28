@@ -30,6 +30,8 @@ import {
   EyeOff,
   Eye,
   ImageOff,
+  Pencil,
+  HardDriveDownload,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/lib/ai-canvas/store'
@@ -200,6 +202,39 @@ export function AssetsDialog() {
       await refresh()
     } catch (e) {
       showToast('error', e instanceof Error ? e.message : '删除失败')
+    }
+  }
+
+  const renameAsset = async (item: AssetItem) => {
+    const name = window.prompt('重命名素材（保留原扩展名）', item.name)
+    if (!name || !name.trim() || name.trim() === item.name) return
+    try {
+      const res = await fetch('/api/assets', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: item.url, name: name.trim() }),
+      })
+      const j = await res.json()
+      if (!res.ok) throw new Error(j.error || '重命名失败')
+      showToast('success', `已重命名为「${j.name}」`)
+      await refresh()
+    } catch (e) {
+      showToast('error', e instanceof Error ? e.message : '重命名失败')
+    }
+  }
+
+  const exportAsset = async (item: AssetItem) => {
+    try {
+      const res = await fetch('/api/assets/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: item.url }),
+      })
+      const j = await res.json()
+      if (!res.ok) throw new Error(j.error || '导出失败')
+      showToast('success', `已导出到 download/${j.name}`)
+    } catch (e) {
+      showToast('error', e instanceof Error ? e.message : '导出失败')
     }
   }
 
@@ -383,30 +418,46 @@ export function AssetsDialog() {
                       {item.name}
                     </p>
                     <p className="text-[9px] text-zinc-600">{fmtDate(item.mtime)}</p>
-                    <div className="flex items-center gap-1 pt-0.5">
+                    <div className="flex flex-wrap items-center gap-1 pt-0.5">
                       <button
                         onClick={() => insertAsset(item)}
-                        className="flex h-6 flex-1 items-center justify-center gap-1 rounded-md bg-gradient-to-r from-amber-500/90 to-orange-500/90 text-[10px] font-medium text-zinc-950 transition hover:from-amber-400 hover:to-orange-400"
+                        className="flex h-6 min-w-[84px] flex-1 items-center justify-center gap-1 rounded-md bg-gradient-to-r from-amber-500/90 to-orange-500/90 text-[10px] font-medium text-zinc-950 transition hover:from-amber-400 hover:to-orange-400"
                         title="插入画布（生成素材引用节点）"
                       >
                         <Plus className="h-3 w-3" />
                         插入画布
                       </button>
-                      <a
-                        href={item.url}
-                        download={item.name}
-                        className="flex h-6 w-6 items-center justify-center rounded-md text-zinc-500 transition hover:bg-zinc-800 hover:text-zinc-200"
-                        title="下载"
-                      >
-                        <Download className="h-3 w-3" />
-                      </a>
-                      <button
-                        onClick={() => void removeAsset(item)}
-                        className="flex h-6 w-6 items-center justify-center rounded-md text-zinc-500 transition hover:bg-rose-500/15 hover:text-rose-300"
-                        title="删除"
-                      >
-                        <Trash2 className="h-3 w-3" />
-                      </button>
+                      <div className="flex items-center">
+                        <a
+                          href={item.url}
+                          download={item.name}
+                          className="flex h-6 w-6 items-center justify-center rounded-md text-zinc-500 transition hover:bg-zinc-800 hover:text-zinc-200"
+                          title="浏览器下载"
+                        >
+                          <Download className="h-3 w-3" />
+                        </a>
+                        <button
+                          onClick={() => void exportAsset(item)}
+                          className="flex h-6 w-6 items-center justify-center rounded-md text-zinc-500 transition hover:bg-sky-500/15 hover:text-sky-300"
+                          title="导出到 download 归档目录"
+                        >
+                          <HardDriveDownload className="h-3 w-3" />
+                        </button>
+                        <button
+                          onClick={() => void renameAsset(item)}
+                          className="flex h-6 w-6 items-center justify-center rounded-md text-zinc-500 transition hover:bg-zinc-800 hover:text-zinc-200"
+                          title="重命名"
+                        >
+                          <Pencil className="h-3 w-3" />
+                        </button>
+                        <button
+                          onClick={() => void removeAsset(item)}
+                          className="flex h-6 w-6 items-center justify-center rounded-md text-zinc-500 transition hover:bg-rose-500/15 hover:text-rose-300"
+                          title="删除"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>

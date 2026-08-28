@@ -639,6 +639,26 @@ export function getSpec(type: string): NodeSpec | undefined {
   return NODE_SPECS[type]
 }
 
+/* ---------------------------------- 节点分组 ---------------------------------- */
+
+/** 分组框色板（border/bg/dot 组合的 tailwind 类） */
+export const GROUP_COLORS = [
+  { key: 'amber',   label: '琥珀', border: 'border-amber-400/50',   bg: 'bg-amber-500/[0.05]',   dot: 'bg-amber-400',   chip: 'bg-amber-500/15 text-amber-200' },
+  { key: 'emerald', label: '翠绿', border: 'border-emerald-400/50', bg: 'bg-emerald-500/[0.05]', dot: 'bg-emerald-400', chip: 'bg-emerald-500/15 text-emerald-200' },
+  { key: 'rose',    label: '玫红', border: 'border-rose-400/50',    bg: 'bg-rose-500/[0.05]',    dot: 'bg-rose-400',    chip: 'bg-rose-500/15 text-rose-200' },
+  { key: 'violet',  label: '紫罗', border: 'border-violet-400/50',  bg: 'bg-violet-500/[0.05]',  dot: 'bg-violet-400',  chip: 'bg-violet-500/15 text-violet-200' },
+  { key: 'cyan',    label: '青蓝', border: 'border-cyan-400/50',    bg: 'bg-cyan-500/[0.05]',    dot: 'bg-cyan-400',    chip: 'bg-cyan-500/15 text-cyan-200' },
+  { key: 'lime',    label: '青柠', border: 'border-lime-400/50',    bg: 'bg-lime-500/[0.05]',    dot: 'bg-lime-400',    chip: 'bg-lime-500/15 text-lime-200' },
+  { key: 'orange',  label: '橙橘', border: 'border-orange-400/50',  bg: 'bg-orange-500/[0.05]',  dot: 'bg-orange-400',  chip: 'bg-orange-500/15 text-orange-200' },
+  { key: 'sky',     label: '天蓝', border: 'border-sky-400/50',     bg: 'bg-sky-500/[0.05]',     dot: 'bg-sky-400',     chip: 'bg-sky-500/15 text-sky-200' },
+] as const
+
+export type GroupColorKey = (typeof GROUP_COLORS)[number]['key']
+
+export function getGroupColor(key: string) {
+  return GROUP_COLORS.find((c) => c.key === key) ?? GROUP_COLORS[0]
+}
+
 /** 创建节点默认数据 */
 export function createNodeData(type: string): CanvasNodeData {
   const spec = NODE_SPECS[type]
