@@ -1,0 +1,42 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// AI 视频创作画布工作流
+model Workflow {
+  id          String   @id @default(cuid())
+  name        String   @default("未命名工作流")
+  description String   @default("")
+  // 完整画布图 { nodes: [], edges: [] }
+  graph       String   @default("{\"nodes\":[],\"edges\":[]}")
+  thumbnail   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  executions  Execution[]
+}
+
+// 节点执行任务记录（支持异步轮询：视频生成等）
+model Execution {
+  id         String    @id @default(cuid())
+  workflowId String?
+  nodeId     String
+  nodeType   String
+  // idle | running | success | failed
+  status     String    @default("running")
+  progress   Int       @default(0)
+  stage      String    @default("")
+  // 输入快照
+  input      String    @default("{}")
+  params     String    @default("{}")
+  // 输出 { [handleId]: { kind, url?, text?, mimeType? } }
+  output     String?
+  error      String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  workflow   Workflow? @relation(fields: [workflowId], references: [id], onDelete: SetNull)
+}

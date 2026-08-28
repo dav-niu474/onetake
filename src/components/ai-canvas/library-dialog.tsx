@@ -1,0 +1,143 @@
+'use client'
+
+/**
+ * 作品库对话框：已保存工作流列表
+ */
+import { useEffect, useState } from 'react'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Button } from '@/components/ui/button'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import {
+  FolderOpen,
+  Trash2,
+  Clock3,
+  Workflow as WorkflowIcon,
+  PenLine,
+} from 'lucide-react'
+import { useCanvasStore } from '@/lib/ai-canvas/store'
+import { deleteWorkflow, openWorkflow } from '@/lib/ai-canvas/persistence'
+
+interface WorkflowItem {
+  id: string
+  name: string
+  description: string
+  updatedAt: string
+}
+
+export function LibraryDialog() {
+  const open = useCanvasStore((s) => s.libraryOpen)
+  const setOpen = useCanvasStore((s) => s.setLibraryOpen)
+  const [items, setItems] = useState<WorkflowItem[]>([])
+  const [loading, setLoading] = useState(false)
+
+  const refresh = async () => {
+    setLoading(true)
+    try {
+      const res = await fetch('/api/workflows', { cache: 'no-store' })
+      const j = await res.json()
+      setItems(j.items ?? [])
+    } catch {
+      setItems([])
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (open) void refresh()
+  }, [open])
+
+  const fmt = (iso: string) => {
+    try {
+      return new Date(iso).toLocaleString('zh-CN', { hour12: false })
+    } catch {
+      return iso
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogContent className="border-zinc-800 bg-zinc-950 sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-zinc-100">
+            <FolderOpen className="h-4 w-4 text-amber-400" />
+            作品库
+          </DialogTitle>
+          <DialogDescription className="text-zinc-500">
+            打开已保存的工作流继续创作
+          </DialogDescription>
+        </DialogHeader>
+
+        <ScrollArea className="max-h-[380px] pr-2">
+          {loading ? (
+            <div className="space-y-2">
+              {[1, 2, 3].map((i) => (
+                <div key={i} className="h-[72px] animate-pulse rounded-lg bg-zinc-900" />
+              ))}
+            </div>
+          ) : items.length === 0 ? (
+            <div className="flex flex-col items-center gap-2 py-12 text-zinc-600">
+              <WorkflowIcon className="h-8 w-8" />
+              <p className="text-xs">还没有保存的作品，去画布创作吧</p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {items.map((item) => {
+                const isCurrent = useCanvasStore.getState().workflow.id === item.id
+                return (
+                  <div
+                    key={item.id}
+                    className="group flex items-center gap-3 rounded-lg border border-zinc-800/80 bg-zinc-900/60 p-3 transition hover:border-zinc-600 hover:bg-zinc-900"
+                  >
+                    <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-amber-500/20 to-fuchsia-500/20 text-amber-300">
+                      <PenLine className="h-4 w-4" />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-[13px] font-medium text-zinc-200">
+                        {item.name}
+                        {isCurrent && (
+                          <span className="ml-2 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[9px] text-emerald-300">
+                            当前
+                          </span>
+                        )}
+                      </p>
+                      <p className="mt-0.5 flex items-center gap-1 text-[10px] text-zinc-500">
+                        <Clock3 className="h-3 w-3" />
+                        {fmt(item.updatedAt)}
+                      </p>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 rounded-md border-zinc-700 px-2.5 text-[11px] text-zinc-200 hover:border-zinc-500 hover:bg-zinc-800"
+                      onClick={() => void openWorkflow(item.id)}
+                    >
+                      打开
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 w-7 rounded-md p-0 text-zinc-500 hover:bg-rose-500/15 hover:text-rose-300"
+                      title="删除"
+                      onClick={() => {
+                        if (window.confirm(`确定删除「${item.name}」？`)) void deleteWorkflow(item.id).then(refresh)
+                      }}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </ScrollArea>
+      </DialogContent>
+    </Dialog>
+  )
+}
