@@ -52,3 +52,12 @@ prompt
 server.log
 # Skills directory
 /skills/
+
+# runtime artifacts / generated media / local data
+/db/
+/download/
+/public/generated/
+/public/uploads/
+/tool-results/
+/agent-ctx/
+*.pid
