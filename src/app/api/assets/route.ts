@@ -26,8 +26,67 @@ const KIND_BY_EXT: Record<string, 'image' | 'video' | 'audio'> = {
   m4a: 'audio',
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
+    /* 引用统计模式：统计某素材被工作流引用的次数（删除前确认用） */
+    const refsUrl = req.nextUrl.searchParams.get('refs')
+    if (refsUrl) {
+      const m = parseAssetUrl(refsUrl)
+      if (!m) {
+        return NextResponse.json({ error: '非法的资源路径' }, { status: 400 })
+      }
+      const oldPath = `/${m[1]}/${m[2]}`
+      let refNodes = 0
+      let refWorkflows = 0
+      const workflows = await db.workflow.findMany({ select: { graph: true } })
+      for (const wf of workflows) {
+        let graph: {
+          nodes?: {
+            type?: string
+            data?: {
+              params?: Record<string, unknown>
+              outputs?: Record<string, { url?: string }>
+              inputs?: Record<string, { url?: string }>
+            }
+          }[]
+        } | null = null
+        try {
+          graph = JSON.parse(wf.graph)
+        } catch {
+          continue
+        }
+        if (!graph?.nodes || !Array.isArray(graph.nodes)) continue
+        let hit = 0
+        const matchUrl = (u: unknown) => {
+          if (typeof u !== 'string') return false
+          if (u === oldPath) return true
+          try {
+            return new URL(u).pathname === oldPath
+          } catch {
+            return false
+          }
+        }
+        for (const node of graph.nodes) {
+          const params = node?.data?.params
+          if (node?.type === 'asset' && matchUrl(params?.assetUrl)) {
+            hit++
+            continue
+          }
+          for (const bucket of [node?.data?.inputs, node?.data?.outputs]) {
+            if (!bucket) continue
+            for (const key of Object.keys(bucket)) {
+              if (matchUrl(bucket[key]?.url)) hit++
+            }
+          }
+        }
+        if (hit > 0) {
+          refNodes += hit
+          refWorkflows++
+        }
+      }
+      return NextResponse.json({ refs: refNodes, workflows: refWorkflows })
+    }
+
     const items: {
       url: string
       kind: 'image' | 'video' | 'audio'

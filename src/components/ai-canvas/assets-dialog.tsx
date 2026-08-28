@@ -192,7 +192,24 @@ export function AssetsDialog() {
   }
 
   const removeAsset = async (item: AssetItem) => {
-    if (!window.confirm(`确定删除素材「${item.name}」？正在使用它的工作流将无法再访问该文件。`)) return
+    /* 先查询引用情况，让用户在知情下确认删除 */
+    let refNote = ''
+    try {
+      const res = await fetch(`/api/assets?refs=${encodeURIComponent(item.url)}`, {
+        cache: 'no-store',
+      })
+      if (res.ok) {
+        const j = (await res.json()) as { refs?: number; workflows?: number }
+        const n = Number(j.refs ?? 0)
+        const w = Number(j.workflows ?? 0)
+        if (n > 0) {
+          refNote = `\n\n⚠️ 该素材正被 ${w} 个工作流中的 ${n} 处节点引用，删除后这些引用将失效（节点需重新插入素材）。`
+        }
+      }
+    } catch {
+      /* 引用查询失败不阻塞删除流程 */
+    }
+    if (!window.confirm(`确定删除素材「${item.name}」？${refNote || '删除后不可恢复。'}`)) return
     try {
       const res = await fetch(`/api/assets?url=${encodeURIComponent(item.url)}`, {
         method: 'DELETE',

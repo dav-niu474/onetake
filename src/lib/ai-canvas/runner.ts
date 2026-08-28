@@ -523,7 +523,10 @@ async function runTextToVideo(
         quality: quality as 'speed' | 'quality',
         with_audio: withAudio,
       }),
-    { label: '视频任务提交', onRetry: onProgress },
+    // 视频任务提交限流严格：实测不仅限并发（同账号同时仅 1 个活跃任务），
+    // 还有分钟级时间窗配额 —— 串行单独提交仍会 429，且窗口可超过 100s（Task 8 实证）。
+    // 重试 6 次、15s 线性退避（15/30/45/60/75/90s，总窗口 ≈5min）适配长配额窗口
+    { retries: 6, baseDelay: 15000, label: '视频任务提交', onRetry: onProgress },
   )
   const remoteUrl = await pollVideoTask(zai, task.id, onProgress)
   onProgress('正在下载视频…', 93)
@@ -556,7 +559,9 @@ async function runImageToVideo(
         quality: quality as 'speed' | 'quality',
         with_audio: withAudio,
       }),
-    { label: '视频任务提交', onRetry: onProgress },
+    // 同 runTextToVideo：提交阶段限流严格（并发 + 分钟级时间窗双重配额），
+    // 加强重试（15/30/45/60/75/90s，总窗口 ≈5min）
+    { retries: 6, baseDelay: 15000, label: '视频任务提交', onRetry: onProgress },
   )
   const remoteUrl = await pollVideoTask(zai, task.id, onProgress)
   onProgress('正在下载视频…', 93)

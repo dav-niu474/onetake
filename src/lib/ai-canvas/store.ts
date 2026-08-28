@@ -113,6 +113,8 @@ export interface CanvasStore {
   duplicateNode: (id: string) => void
   /* 分组 */
   createGroupFromSelection: () => string | null
+  /** 拖拽同步成员：节点拖入分组框→加入，拖出→移出；返回变更摘要（供 toast） */
+  syncGroupMemberships: (nodeIds: string[]) => { added: number; removed: number } | null
   renameGroup: (id: string, name: string) => void
   setGroupColor: (id: string, color: string) => void
   toggleGroupCollapse: (id: string) => void
@@ -645,6 +647,136 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
     })),
 
   setSelectedGroupId: (id) => set({ selectedGroupId: id }),
+
+  /**
+   * 拖拽同步分组成员关系：
+   * - 节点拖拽落点中心落入某个展开分组框 → 加入该分组
+   * - 落点在自身分组框外 → 移出分组；成员不足的分组自动解散
+   * 关键：分组包围盒计算时**排除全部被拖拽节点**，
+   * 否则包围盒会跟随被拖成员伸展，节点永远在自身分组框内，无法检测「拖出」。
+   * 包围盒与 group-layer.tsx 的 PAD_* 常量保持一致（改动需双方同步）
+   */
+  syncGroupMemberships: (nodeIds) => {
+    const { nodes, groups } = get()
+    const expanded = groups.filter((g) => !g.collapsed)
+    if (expanded.length === 0) return null
+
+    const sizeOf = (n: Node<CanvasNodeData>) => ({
+      w: n.measured?.width ?? NODE_SPECS[n.type ?? '']?.width ?? 280,
+      h: n.measured?.height ?? 120,
+    })
+    const PAD_X = 28
+    const PAD_TOP = 44
+    const PAD_BOTTOM = 28
+
+    const draggedSet = new Set(nodeIds)
+
+    const boundsList = expanded
+      .map((g) => {
+        let minX = Infinity
+        let minY = Infinity
+        let maxX = -Infinity
+        let maxY = -Infinity
+        for (const id of g.nodeIds) {
+          // 排除被拖拽节点：残余成员定义框体，拖出的节点才能判定为框外
+          if (draggedSet.has(id)) continue
+          const n = nodes.find((x) => x.id === id)
+          if (!n) continue
+          const { w, h } = sizeOf(n)
+          minX = Math.min(minX, n.position.x)
+          minY = Math.min(minY, n.position.y)
+          maxX = Math.max(maxX, n.position.x + w)
+          maxY = Math.max(maxY, n.position.y + h)
+        }
+        if (minX === Infinity) return null
+        return {
+          g,
+          x1: minX - PAD_X,
+          y1: minY - PAD_TOP,
+          x2: maxX + PAD_X,
+          y2: maxY + PAD_BOTTOM,
+        }
+      })
+      .filter((x): x is NonNullable<typeof x> => !!x)
+    // boundsList 可能为空（如分组仅剩被拖节点）：
+    // 此时被拖成员的中心不命中任何框 → 判定为拖出，分组随之解散
+
+    const addMap = new Map<string, string[]>()
+    const removeMap = new Map<string, string[]>()
+    let changed = false
+
+    for (const id of nodeIds) {
+      const n = nodes.find((x) => x.id === id)
+      if (!n || n.hidden) continue
+      const { w, h } = sizeOf(n)
+      const cx = n.position.x + w / 2
+      const cy = n.position.y + h / 2
+      const currentGroup = groups.find((g) => g.nodeIds.includes(id))
+      // 命中的分组取面积最小者（避免嵌套大框抢占）
+      const hit = boundsList
+        .filter((b) => cx >= b.x1 && cx <= b.x2 && cy >= b.y1 && cy <= b.y2)
+        .sort(
+          (a, b) =>
+            (a.x2 - a.x1) * (a.y2 - a.y1) - (b.x2 - b.x1) * (b.y2 - b.y1),
+        )[0]
+      const targetId = hit?.g.id ?? null
+      if (targetId === currentGroup?.id) continue
+      changed = true
+      if (currentGroup) {
+        const arr = removeMap.get(currentGroup.id) ?? []
+        arr.push(id)
+        removeMap.set(currentGroup.id, arr)
+      }
+      if (targetId) {
+        const arr = addMap.get(targetId) ?? []
+        arr.push(id)
+        addMap.set(targetId, arr)
+      }
+    }
+    if (!changed) return null
+
+    get().commit()
+    let nextGroups = groups.map((g) => ({ ...g, nodeIds: [...g.nodeIds] }))
+    removeMap.forEach((ids, gid) => {
+      nextGroups = nextGroups.map((g) =>
+        g.id === gid ? { ...g, nodeIds: g.nodeIds.filter((x) => !ids.includes(x)) } : g,
+      )
+    })
+    addMap.forEach((ids, gid) => {
+      nextGroups = nextGroups.map((g) =>
+        g.id === gid ? { ...g, nodeIds: [...g.nodeIds, ...ids] } : g,
+      )
+    })
+    // 解散空分组
+    const dissolved = nextGroups.filter((g) => g.nodeIds.length === 0)
+    if (dissolved.length > 0) {
+      const dissolvedIds = new Set(dissolved.map((g) => g.id))
+      nextGroups = nextGroups.filter((g) => g.nodeIds.length > 0)
+      if (get().selectedGroupId && dissolvedIds.has(get().selectedGroupId!)) {
+        set({ selectedGroupId: null })
+      }
+    }
+    set({ groups: nextGroups, dirty: true })
+
+    const added = [...addMap.values()].reduce((a, b) => a + b.length, 0)
+    const removed = [...removeMap.values()].reduce((a, b) => a + b.length, 0)
+    const parts: string[] = []
+    addMap.forEach((ids, gid) => {
+      const g = nextGroups.find((x) => x.id === gid)
+      if (g) parts.push(`${ids.length} 个节点加入「${g.name}」`)
+    })
+    removeMap.forEach((ids, gid) => {
+      const g = nextGroups.find((x) => x.id === gid)
+      if (g) parts.push(`${ids.length} 个节点移出「${g.name}」`)
+    })
+    if (dissolved.length > 0) {
+      parts.push(
+        dissolved.length === 1 ? `「${dissolved[0].name}」已解散` : `${dissolved.length} 个空分组已解散`,
+      )
+    }
+    if (parts.length > 0) get().showToast('success', parts.join('，'))
+    return { added, removed }
+  },
 
   setEdges: (edges) => set({ edges, dirty: true }),
 

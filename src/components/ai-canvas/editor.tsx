@@ -201,7 +201,9 @@ function CanvasInner() {
       const type = e.dataTransfer.getData('application/ai-node')
       if (!type || !NODE_SPECS[type]) return
       const position = screenToFlowPosition({ x: e.clientX, y: e.clientY })
-      addNode(type, position)
+      const id = addNode(type, position)
+      // 落点在分组框内则自动加入该分组（与节点拖拽成员同步同一套几何逻辑）
+      if (id) useCanvasStore.getState().syncGroupMemberships([id])
     },
     [screenToFlowPosition, addNode],
   )
@@ -217,7 +219,9 @@ function CanvasInner() {
       const position = screenToFlowPosition({ x: cx, y: cy })
       position.x += (Math.random() - 0.5) * 80
       position.y += (Math.random() - 0.5) * 60
-      addNode(type, position)
+      const id = addNode(type, position)
+      // 画布中央若落在某个分组框内，同样自动入组
+      if (id) useCanvasStore.getState().syncGroupMemberships([id])
     }
     window.addEventListener('ai-canvas:add-node', handler)
     return () => window.removeEventListener('ai-canvas:add-node', handler)
@@ -457,6 +461,13 @@ function CanvasInner() {
               })
             }}
             onNodeDragStart={closeMenu}
+            onNodeDragStop={(_e, _node, draggedNodes) => {
+              // 拖拽落点同步分组成员关系（拖入分组框=加入，拖出=移出）
+              const ids = (draggedNodes as { id: string }[]).map((n) => n.id)
+              if (ids.length > 0) {
+                useCanvasStore.getState().syncGroupMemberships(ids)
+              }
+            }}
             defaultEdgeOptions={{ type: 'canvas' }}
             deleteKeyCode={['Delete', 'Backspace']}
             multiSelectionKeyCode={['Shift', 'Meta']}

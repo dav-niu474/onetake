@@ -161,6 +161,9 @@ export async function resumeWorkflowTasks() {
     }
     let resumed = 0
     let restored = 0
+    // 恢复任务落定回调：在循环结束后按实际恢复数赋值
+    // （pollExecution 首次轮询前有 1.2s 延时，同步循环内不可能提前触发）
+    let onTaskSettled: (() => void) | null = null
     for (const item of items) {
       const node = useCanvasStore.getState().nodes.find((n) => n.id === item.nodeId)
       if (!node) continue
@@ -183,6 +186,9 @@ export async function resumeWorkflowTasks() {
                 .setNodeRunState(item.nodeId, 'failed', { stage: '失败', error: msg })
             }
           })
+          .finally(() => {
+            onTaskSettled?.()
+          })
       } else if (item.status === 'success' && item.output) {
         const hasAny = Object.keys(node.data.outputs ?? {}).length > 0
         if (!hasAny) {
@@ -198,6 +204,21 @@ export async function resumeWorkflowTasks() {
     }
     if (resumed > 0) {
       useCanvasStore.getState().showToast('info', `已恢复 ${resumed} 个后台任务的进度监控`)
+      // 同步运行标志：顶栏显示「停止」、阻断运行中重复触发全图运行；
+      // 全部恢复任务落定后自动复位
+      let pending = resumed
+      useCanvasStore.getState().setRunning(true)
+      onTaskSettled = () => {
+        pending -= 1
+        if (pending <= 0 && useCanvasStore.getState().running) {
+          // 若仍有节点处于执行/排队态（如 dev HMR 场景下孤儿循环在跑其他任务），
+          // 不复位运行标志，交由实际执行方收尾
+          const busy = useCanvasStore
+            .getState()
+            .nodes.some((n) => n.data.runState === 'running' || n.data.runState === 'queued')
+          if (!busy) useCanvasStore.getState().setRunning(false)
+        }
+      }
     }
     void restored
   } catch {
@@ -368,13 +389,17 @@ async function runPool<T>(tasks: (() => Promise<T>)[], limit: number): Promise<P
 
 /* ---------- 按节点类型分池限流 ----------
  * LLM / TTS 接口并发 3 时必现 429（实测），单独限 2；
- * AI 媒体生成（图/视频）限 3；ffmpeg 本地进程限 2（IO 密集，避免拖垮机器）。
+ * 视频生成接口实测为「同账号同时仅允许 1 个活跃任务」：
+ * 并发 2/3 提交时后者持续 429（重试 3 次共 24s 退避仍失败，Task 8 实证），
+ * 因此视频池严格串行（=1），提交重试（4s/8s/12s）保留作兜底；
+ * 图像生成相对宽松限 3；ffmpeg 本地进程限 2（IO 密集，避免拖垮机器）。
  */
-type PoolCategory = 'llm' | 'media' | 'ffmpeg'
+type PoolCategory = 'llm' | 'video' | 'image' | 'ffmpeg'
 
 const POOL_LIMITS: Record<PoolCategory, number> = {
   llm: 2,
-  media: 3,
+  video: 1,
+  image: 3,
   ffmpeg: 2,
 }
 
@@ -383,8 +408,9 @@ const MAX_PARALLEL = 6
 
 function poolCategoryOf(nodeType: string): PoolCategory {
   if (nodeType === 'enhancer' || nodeType === 'tts') return 'llm'
+  if (nodeType === 'textToVideo' || nodeType === 'imageToVideo') return 'video'
   if (nodeType === 'concat' || nodeType === 'avMerge') return 'ffmpeg'
-  return 'media'
+  return 'image'
 }
 
 class Semaphore {
@@ -525,7 +551,8 @@ async function runScope(coreIds: string[] | null, scopeName?: string) {
     if (execIds.length > 0) {
       const sems: Record<PoolCategory, Semaphore> = {
         llm: new Semaphore(POOL_LIMITS.llm),
-        media: new Semaphore(POOL_LIMITS.media),
+        video: new Semaphore(POOL_LIMITS.video),
+        image: new Semaphore(POOL_LIMITS.image),
         ffmpeg: new Semaphore(POOL_LIMITS.ffmpeg),
       }
       const typeOf = (id: string) =>
