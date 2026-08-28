@@ -477,8 +477,12 @@ function CanvasInner() {
 
   const onNodeDrag = useCallback(
     (_e: unknown, dragged: Node<CanvasNodeData>, draggedNodes: Node<CanvasNodeData>[]) => {
+      const store = useCanvasStore.getState()
+      const ids = (draggedNodes as { id: string }[]).map((n) => n.id)
+      /* 分组成员拖拽预览：悬停命中分组框时实时高亮（多选拖拽也生效） */
+      store.setGroupDragHint(ids.length > 0 ? store.computeGroupDragHint(ids) : null)
       if (draggedNodes.length !== 1) {
-        useCanvasStore.getState().setGuides(null)
+        store.setGuides(null)
         return
       }
       applyAlignment(dragged, useCanvasStore.getState().nodes)
@@ -550,6 +554,8 @@ function CanvasInner() {
               }
               // 清除对齐参考线
               useCanvasStore.getState().setGuides(null)
+              // 清除分组成员拖拽预览
+              useCanvasStore.getState().setGroupDragHint(null)
               // 拖拽落点同步分组成员关系（拖入分组框=加入，拖出=移出）
               const ids = (draggedNodes as { id: string }[]).map((n) => n.id)
               if (ids.length > 0) {
@@ -576,6 +582,12 @@ function CanvasInner() {
               color="#3f3f46"
               className="opacity-70"
             />
+            {/*
+              节点分组渲染层：作为 ReactFlow 子元素渲染（z-1 < 视口 z-2），
+              框体在节点之下——成员节点可正常拖拽/点选，框体空白区域可拖动整组；
+              之前作为外部 overlay（z-1 > 画布 z-0 stacking context）会拦截全部成员节点的鼠标事件
+            */}
+            <GroupLayer onGroupContextMenu={openGroupMenu} />
             <Controls
               showInteractive={false}
               position="bottom-right"
@@ -605,10 +617,7 @@ function CanvasInner() {
             />
           </ReactFlow>
 
-          {/* 节点分组渲染层（overlay，跟随视口 transform） */}
-          <GroupLayer onGroupContextMenu={openGroupMenu} />
-
-          {/* 拖拽对齐参考线（overlay） */}
+          {/* 拖拽对齐参考线（overlay，pointer-events-none 不拦截事件） */}
           <AlignmentGuides />
 
           {/* 右侧 Inspector 属性面板（选中单个节点时） */}

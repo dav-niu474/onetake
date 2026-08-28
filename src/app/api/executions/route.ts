@@ -74,7 +74,8 @@ export async function GET(req: NextRequest) {
 
 /**
  * 创建节点执行任务并立即返回（后台异步运行）
- * body: { workflowId?, nodeId, nodeType, inputs, params }
+ * body: { workflowId?, nodeId, nodeType, inputs, params, snapshot? }
+ * snapshot = 执行时刻的画布布局快照（运行历史迷你图用）
  */
 export async function POST(req: NextRequest) {
   try {
@@ -94,6 +95,23 @@ export async function POST(req: NextRequest) {
         params: JSON.stringify(body.params ?? {}),
       },
     })
+    // 画布快照走原生 SQL 写入（兼容 dev server 缓存的旧 Prisma Client 运行时）
+    if (body.snapshot && typeof body.snapshot === 'object') {
+      try {
+        const snapJson = JSON.stringify(body.snapshot)
+        if (snapJson.length <= 512 * 1024) {
+          void db
+            .$executeRawUnsafe(
+              'UPDATE Execution SET snapshot = ? WHERE id = ?',
+              snapJson,
+              row.id,
+            )
+            .catch(() => undefined)
+        }
+      } catch {
+        /* 快照失败不影响执行 */
+      }
+    }
 
     // 后台执行（fire-and-forget），客户端轮询进度
     void (async () => {

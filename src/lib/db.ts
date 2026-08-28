@@ -1,7 +1,7 @@
 import { PrismaClient } from '@prisma/client'
 
-// SCHEMA_VERSION: remoteTaskId added (2026-08-28) — bump to bust global client cache after prisma db:push
-const SCHEMA_VERSION = 'v2'
+// SCHEMA_VERSION: snapshot added (2026-08-28) — bump to bust global client cache after prisma db:push
+const SCHEMA_VERSION = 'v3'
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined

@@ -5,6 +5,9 @@ import { db } from '@/lib/db'
  * 执行历史：查询最近的节点执行记录（原始记录，不去重）
  * GET /api/executions/history?workflowId=xxx
  * 不传 workflowId 时返回全部最近记录
+ *
+ * 注：remoteTaskId / snapshot 通过原生 SQL 读取（dev server 的 Prisma Client 可能先于 schema 生成，
+ * 重启后可改回类型化字段；原生 SQL 与两种客户端均兼容）
  */
 export async function GET(req: NextRequest) {
   try {
@@ -26,16 +29,20 @@ export async function GET(req: NextRequest) {
         workflowId: true,
       },
     })
-    // remoteTaskId 原生 SQL 读取（兼容旧客户端运行时，重启后可改回类型化字段）
+    // remoteTaskId / snapshot 原生 SQL 读取（兼容旧客户端运行时，重启后可改回类型化字段）
     const rids = rows.map((r) => r.id)
     const remoteMap = new Map<string, string | null>()
+    const snapMap = new Map<string, string | null>()
     if (rids.length > 0) {
       try {
         const placeholders = rids.map(() => '?').join(',')
         const remoteRows = await db.$queryRawUnsafe<
-          { id: string; remoteTaskId: string | null }[]
-        >(`SELECT id, remoteTaskId FROM Execution WHERE id IN (${placeholders})`, ...rids)
-        remoteRows.forEach((r) => remoteMap.set(r.id, r.remoteTaskId))
+          { id: string; remoteTaskId: string | null; snapshot: string | null }[]
+        >(`SELECT id, remoteTaskId, snapshot FROM Execution WHERE id IN (${placeholders})`, ...rids)
+        remoteRows.forEach((r) => {
+          remoteMap.set(r.id, r.remoteTaskId)
+          snapMap.set(r.id, r.snapshot)
+        })
       } catch {
         /* 列尚不存在时忽略 */
       }
@@ -47,9 +54,17 @@ export async function GET(req: NextRequest) {
       } catch {
         output = null
       }
+      let snapshot: Record<string, unknown> | null = null
+      try {
+        const raw = snapMap.get(row.id) ?? null
+        snapshot = raw ? JSON.parse(raw) : null
+      } catch {
+        snapshot = null
+      }
       return {
         ...row,
         output,
+        snapshot,
         remoteTaskId: remoteMap.get(row.id) ?? null,
         durationMs: Math.max(
           0,

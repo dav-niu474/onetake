@@ -13,6 +13,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useReactFlow, useStore } from '@xyflow/react'
 import {
   Users,
@@ -24,6 +25,8 @@ import {
   Play,
   Crosshair,
   X,
+  CirclePlus,
+  CircleMinus,
 } from 'lucide-react'
 import { useCanvasStore, type CanvasGroup } from '@/lib/ai-canvas/store'
 import { NODE_SPECS, RUN_STATE_META, getGroupColor, type RunState } from '@/lib/ai-canvas/types'
@@ -160,6 +163,26 @@ const STATE_DOT: Record<RunState, string> = {
   skipped: 'bg-zinc-700',
 }
 
+/** 成员拖拽预览提示的视觉样式（加入=翡翠绿 / 移出=玫瑰红） */
+const DRAG_HINT_META = {
+  add: {
+    ring: 'ring-2 ring-emerald-400/80',
+    glow: 'shadow-[0_0_0_1px_rgba(52,211,153,0.45),0_0_36px_-4px_rgba(52,211,153,0.55)]',
+    badge: 'border-emerald-400/60 bg-emerald-500/20 text-emerald-100',
+    bar: 'bg-emerald-400',
+    icon: CirclePlus,
+    text: '松开加入分组',
+  },
+  remove: {
+    ring: 'ring-2 ring-rose-400/80',
+    glow: 'shadow-[0_0_0_1px_rgba(251,113,133,0.45),0_0_36px_-4px_rgba(251,113,133,0.55)]',
+    badge: 'border-rose-400/60 bg-rose-500/20 text-rose-100',
+    bar: 'bg-rose-400',
+    icon: CircleMinus,
+    text: '松开移出分组',
+  },
+} as const
+
 /** 分组运行（带运行中守卫与 toast 反馈） */
 function useRunGroupAction() {
   return (group: CanvasGroup) => {
@@ -186,9 +209,15 @@ function GroupFrame({ bounds, selected, onSelect, onContextMenu }: GroupFramePro
   const startDrag = useGroupDrag()
   const runGroupAction = useRunGroupAction()
   const { setCenter, getZoom } = useReactFlow()
+  /* 拖拽预览提示：命中本分组时高亮框体 + 浮动提示 */
+  const dragHintRaw = useCanvasStore((s) => s.groupDragHint)
+  const dragHint = dragHintRaw?.groupId === group.id ? dragHintRaw : null
+  const hintMeta = dragHint ? DRAG_HINT_META[dragHint.action] : null
+  const HintIcon = hintMeta?.icon
 
-  /* 成员清单浮层 */
+  /* 成员清单浮层（portal 定位：记录打开时标签 chip 的屏幕位置） */
   const [membersOpen, setMembersOpen] = useState(false)
+  const [chipRect, setChipRect] = useState({ left: 0, top: 0, bottom: 0 })
   const popoverRef = useRef<HTMLDivElement>(null)
   const chipRef = useRef<HTMLSpanElement>(null)
   // 注意：selector 必须返回稳定引用（zustand v5 getSnapshot 缓存约束），
@@ -256,6 +285,8 @@ function GroupFrame({ bounds, selected, onSelect, onContextMenu }: GroupFramePro
           color.border,
           color.bg,
           selected && 'ring-1 ring-white/20',
+          hintMeta && hintMeta.ring,
+          hintMeta && hintMeta.glow,
         )}
         style={{ left: x, top: y, width: w, height: h }}
         onMouseDown={(e) => startDrag(e, group)}
@@ -263,8 +294,19 @@ function GroupFrame({ bounds, selected, onSelect, onContextMenu }: GroupFramePro
         onDoubleClick={toggleCollapse}
         title="双击展开分组"
       >
-        {/* 渐变装饰条 */}
-        <span className={cn('absolute inset-x-0 top-0 h-[3px] opacity-80', color.dot)} />
+        {/* 渐变装饰条（拖拽提示时变色） */}
+        <span className={cn('absolute inset-x-0 top-0 h-[3px] opacity-80', hintMeta ? hintMeta.bar : color.dot)} />
+        {dragHint && HintIcon && (
+          <span
+            className={cn(
+              'pointer-events-none absolute right-2 top-2 z-10 flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[9px] font-medium shadow-sm backdrop-blur',
+              hintMeta.badge,
+            )}
+          >
+            <HintIcon className="h-3 w-3" />
+            {hintMeta.text}
+          </span>
+        )}
         <div className="flex h-full items-center gap-2.5 px-3">
           <span
             className={cn(
@@ -325,11 +367,26 @@ function GroupFrame({ bounds, selected, onSelect, onContextMenu }: GroupFramePro
         color.border,
         color.bg,
         selected && 'shadow-[0_0_0_1px_rgba(255,255,255,0.08),0_8px_40px_-12px_rgba(0,0,0,0.8)]',
+        hintMeta && hintMeta.ring,
+        hintMeta && hintMeta.glow,
       )}
       style={{ left: x, top: y, width: w, height: h }}
       onMouseDown={(e) => startDrag(e, group)}
       onContextMenu={onContextMenu}
     >
+      {/* 拖拽预览提示徽标（标签下方，任意框宽下都可见） */}
+      {dragHint && HintIcon && (
+        <span
+          className={cn(
+            'pointer-events-none absolute left-2.5 top-9 z-10 flex items-center gap-1 rounded-md border px-2 py-1 text-[10px] font-medium shadow-md backdrop-blur animate-in fade-in zoom-in-95 duration-150',
+            hintMeta.badge,
+          )}
+        >
+          <HintIcon className="h-3.5 w-3.5" />
+          {hintMeta.text}
+        </span>
+      )}
+
       {/* 标签栏（框体内部顶部，避免被顶栏遮挡） */}
       <div
         className="pointer-events-auto absolute left-2.5 top-2 flex max-w-[calc(100%-16px)] items-center gap-1.5"
@@ -342,6 +399,8 @@ function GroupFrame({ bounds, selected, onSelect, onContextMenu }: GroupFramePro
           ref={chipRef}
           onClick={(e) => {
             e.stopPropagation()
+            const r = chipRef.current?.getBoundingClientRect()
+            if (r) setChipRect({ left: r.left, top: r.top, bottom: r.bottom })
             setMembersOpen((v) => !v)
           }}
           className={cn(
@@ -395,14 +454,19 @@ function GroupFrame({ bounds, selected, onSelect, onContextMenu }: GroupFramePro
         )}
       </div>
 
-      {/* 成员清单浮层 */}
-      {membersOpen && (
-        <div
-          ref={popoverRef}
-          data-frame-ui
-          onMouseDown={(e) => e.stopPropagation()}
-          className="absolute left-2.5 top-9 z-20 w-60 overflow-hidden rounded-xl border border-zinc-700/90 bg-zinc-900/97 shadow-[0_18px_50px_-12px_rgba(0,0,0,0.95)] backdrop-blur-md"
-        >
+      {/* 成员清单浮层：portal 到 body（框体在节点层之下，浮层需提升到最顶层） */}
+      {membersOpen &&
+        createPortal(
+          <div
+            ref={popoverRef}
+            data-frame-ui
+            onMouseDown={(e) => e.stopPropagation()}
+            className="fixed z-[60] w-60 overflow-hidden rounded-xl border border-zinc-700/90 bg-zinc-900/97 shadow-[0_18px_50px_-12px_rgba(0,0,0,0.95)] backdrop-blur-md animate-in fade-in zoom-in-95 duration-150"
+            style={{
+              left: Math.min(chipRect.left, window.innerWidth - 252),
+              top: Math.min(chipRect.bottom + 6, window.innerHeight - 320),
+            }}
+          >
           <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
             <p className="flex items-center gap-1.5 text-[10px] font-semibold text-zinc-300">
               <Users className="h-3 w-3 opacity-60" />
@@ -463,8 +527,9 @@ function GroupFrame({ bounds, selected, onSelect, onContextMenu }: GroupFramePro
               <p className="text-[9px] text-zinc-500">点击成员可定位节点；拖动节点进出框体可调整成员</p>
             </div>
           )}
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
 
       {/* 四角装饰 */}
       <span className={cn('absolute -left-[2px] -top-[2px] h-2.5 w-2.5 rounded-tl-xl border-l-2 border-t-2', color.border)} />

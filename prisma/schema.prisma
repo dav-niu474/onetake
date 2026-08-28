@@ -37,6 +37,8 @@ model Execution {
   params     String    @default("{}")
   // 输出 { [handleId]: { kind, url?, text?, mimeType? } }
   output     String?
+  // 执行时刻的画布布局快照 { focus, nodes[{id,type,x,y,label,state}], edges[[s,sh,t,th]] }
+  snapshot   String?
   error      String?
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt

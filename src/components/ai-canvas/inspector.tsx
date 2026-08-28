@@ -19,6 +19,7 @@ import {
   PlugZap,
   Info,
   RefreshCw,
+  CloudDownload,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -29,7 +30,7 @@ import {
   type NodeOutput,
 } from '@/lib/ai-canvas/types'
 import { useCanvasStore } from '@/lib/ai-canvas/store'
-import { runNode } from '@/lib/ai-canvas/executor'
+import { runNode, reclaimNodeTask } from '@/lib/ai-canvas/executor'
 import { getAccent } from './nodes/accents'
 import { ParamControl } from './nodes/param-controls'
 import { useIsMobile } from '@/hooks/use-mobile'
@@ -284,6 +285,18 @@ function InspectorBody({ nodeId }: { nodeId: string }) {
               {data.error}
             </div>
           )}
+          {/* 视频节点失败态：提供「找回云端任务」入口（超时/中断/配额场景可凭远端任务 ID 恢复成果） */}
+          {runState === 'failed' &&
+            (node.type === 'textToVideo' || node.type === 'imageToVideo') && (
+              <button
+                onClick={() => void reclaimNodeTask(node.id)}
+                className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-teal-500/40 bg-teal-500/10 py-1.5 text-[11px] font-medium text-teal-200 transition hover:bg-teal-500/20"
+                title="凭远端任务 ID 查询云端状态，成功则把成片回填节点；无远端任务记录时会给出明确提示"
+              >
+                <CloudDownload className="h-3 w-3" />
+                找回云端任务
+              </button>
+            )}
           {spec.executable && runState !== 'running' && (
             <button
               onClick={() => void runNode(node.id)}

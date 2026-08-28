@@ -226,6 +226,29 @@ export async function resumeWorkflowTasks() {
   }
 }
 
+/**
+ * 构建执行时刻的画布布局快照（供运行历史展示迷你图）：
+ * 仅保留渲染必需字段（位置/类型/标签/运行态），体积小（每节点 ≈100B）。
+ */
+function buildCanvasSnapshot(nodeId: string) {
+  const { nodes, edges } = useCanvasStore.getState()
+  return {
+    focus: nodeId,
+    nodes: nodes
+      .filter((n) => !n.hidden)
+      .slice(0, 300) // 超大画布截断保护
+      .map((n) => ({
+        id: n.id,
+        type: n.type ?? '',
+        x: Math.round(n.position.x),
+        y: Math.round(n.position.y),
+        label: n.data.label ?? '',
+        state: n.data.runState ?? 'idle',
+      })),
+    edges: edges.slice(0, 600).map((e) => [e.source, e.sourceHandle ?? '', e.target, e.targetHandle ?? '']),
+  }
+}
+
 /** 执行单个节点（含状态回写与输出传播） */
 export async function runNode(nodeId: string): Promise<boolean> {
   const store = useCanvasStore.getState()
@@ -256,6 +279,8 @@ export async function runNode(nodeId: string): Promise<boolean> {
         nodeType: node.type,
         inputs,
         params: node.data.params,
+        // 执行时刻的画布布局快照：运行历史中可回看当时图结构
+        snapshot: buildCanvasSnapshot(nodeId),
       }),
     })
     if (!res.ok) {
@@ -295,6 +320,7 @@ export async function runNode(nodeId: string): Promise<boolean> {
 /**
  * 找回远端视频任务（超时/中断场景）：
  * 服务端凭 remoteTaskId 查询云端任务状态，成功则下载成片并回填节点输出。
+ * 等待期间节点 stage 实时显示已等待秒数（本地计时器，每 2s 跳动）。
  */
 export async function reclaimNodeTask(nodeId: string): Promise<boolean> {
   const { nodes, workflow, setNodeRunState } = useCanvasStore.getState()
@@ -306,6 +332,14 @@ export async function reclaimNodeTask(nodeId: string): Promise<boolean> {
     progress: 10,
     error: undefined,
   })
+  /* 找回进度可视化：服务端长轮询期间，本地计时器让节点状态实时跳动 */
+  const ticker = setInterval(() => {
+    const sec = Math.round((Date.now() - start) / 1000)
+    useCanvasStore.getState().setNodeRunState(nodeId, 'running', {
+      stage: `正在找回云端任务… 已等待 ${sec}s（云端生成中）`,
+      progress: Math.min(92, 10 + sec * 2),
+    })
+  }, 2000)
   try {
     const res = await fetch('/api/executions/reclaim', {
       method: 'POST',
@@ -343,6 +377,8 @@ export async function reclaimNodeTask(nodeId: string): Promise<boolean> {
     })
     useCanvasStore.getState().showToast('error', `找回失败：${msg}`)
     return false
+  } finally {
+    clearInterval(ticker)
   }
 }
 

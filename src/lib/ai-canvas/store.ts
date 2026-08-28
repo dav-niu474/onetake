@@ -98,6 +98,8 @@ export interface CanvasStore {
   toast: { type: 'success' | 'error' | 'info'; message: string } | null
   /* 拖拽对齐参考线（瞬态，不入撤销栈/持久化）：flow 坐标下的对齐线位置 */
   guides: { vertical: number[]; horizontal: number[] }
+  /* 分组成员拖拽预览提示（瞬态）：拖拽节点悬停在分组框上时的高亮提示 */
+  groupDragHint: { groupId: string; action: 'add' | 'remove' } | null
 
   /* ---- actions ---- */
   onNodesChange: (changes: NodeChange<Node<CanvasNodeData>>[]) => void
@@ -117,6 +119,10 @@ export interface CanvasStore {
   createGroupFromSelection: () => string | null
   /** 拖拽同步成员：节点拖入分组框→加入，拖出→移出；返回变更摘要（供 toast） */
   syncGroupMemberships: (nodeIds: string[]) => { added: number; removed: number } | null
+  /** 拖拽中实时计算成员关系预览（不落库） */
+  computeGroupDragHint: (
+    nodeIds: string[],
+  ) => { groupId: string; action: 'add' | 'remove' } | null
   renameGroup: (id: string, name: string) => void
   setGroupColor: (id: string, color: string) => void
   toggleGroupCollapse: (id: string) => void
@@ -159,6 +165,7 @@ export interface CanvasStore {
   setHistoryOpen: (v: boolean) => void
   setSnapToGrid: (v: boolean) => void
   setGuides: (g: { vertical: number[]; horizontal: number[] } | null) => void
+  setGroupDragHint: (h: { groupId: string; action: 'add' | 'remove' } | null) => void
   showToast: (type: 'success' | 'error' | 'info', message: string) => void
   clearToast: () => void
 }
@@ -166,6 +173,105 @@ export interface CanvasStore {
 function makeId() {
   nodeCounter += 1
   return `n_${Date.now().toString(36)}_${nodeCounter}`
+}
+
+/* ---------- 分组成员几何规划（syncGroupMemberships / computeGroupDragHint 共用） ---------- */
+
+/** 框体相对成员包围盒的外边距（与 group-layer.tsx 的 PAD_* 常量保持一致，改动需双方同步） */
+const PLAN_PAD_X = 28
+const PLAN_PAD_TOP = 44
+const PLAN_PAD_BOTTOM = 28
+
+interface MembershipPlan {
+  addMap: Map<string, string[]>
+  removeMap: Map<string, string[]>
+}
+
+/**
+ * 计算把 nodeIds 拖到当前位置后的成员关系变更计划：
+ * - 落点中心落入某展开分组框 → 加入
+ * - 已是成员但落点在框外 → 移出
+ * 关键：分组包围盒排除全部被拖拽节点（残余成员定义框体），否则无法检测「拖出」
+ */
+function planGroupMembership(
+  nodes: Node<CanvasNodeData>[],
+  groups: CanvasGroup[],
+  nodeIds: string[],
+): MembershipPlan | null {
+  const expanded = groups.filter((g) => !g.collapsed)
+  if (expanded.length === 0) return null
+
+  const sizeOf = (n: Node<CanvasNodeData>) => ({
+    w: n.measured?.width ?? NODE_SPECS[n.type ?? '']?.width ?? 280,
+    h: n.measured?.height ?? 120,
+  })
+
+  const draggedSet = new Set(nodeIds)
+
+  const boundsList = expanded
+    .map((g) => {
+      let minX = Infinity
+      let minY = Infinity
+      let maxX = -Infinity
+      let maxY = -Infinity
+      for (const id of g.nodeIds) {
+        // 排除被拖拽节点：残余成员定义框体，拖出的节点才能判定为框外
+        if (draggedSet.has(id)) continue
+        const n = nodes.find((x) => x.id === id)
+        if (!n) continue
+        const { w, h } = sizeOf(n)
+        minX = Math.min(minX, n.position.x)
+        minY = Math.min(minY, n.position.y)
+        maxX = Math.max(maxX, n.position.x + w)
+        maxY = Math.max(maxY, n.position.y + h)
+      }
+      if (minX === Infinity) return null
+      return {
+        g,
+        x1: minX - PLAN_PAD_X,
+        y1: minY - PLAN_PAD_TOP,
+        x2: maxX + PLAN_PAD_X,
+        y2: maxY + PLAN_PAD_BOTTOM,
+      }
+    })
+    .filter((x): x is NonNullable<typeof x> => !!x)
+  // boundsList 可能为空（如分组仅剩被拖节点）：
+  // 此时被拖成员的中心不命中任何框 → 判定为拖出，分组随之解散
+
+  const addMap = new Map<string, string[]>()
+  const removeMap = new Map<string, string[]>()
+  let changed = false
+
+  for (const id of nodeIds) {
+    const n = nodes.find((x) => x.id === id)
+    if (!n || n.hidden) continue
+    const { w, h } = sizeOf(n)
+    const cx = n.position.x + w / 2
+    const cy = n.position.y + h / 2
+    const currentGroup = groups.find((g) => g.nodeIds.includes(id))
+    // 命中的分组取面积最小者（避免嵌套大框抢占）
+    const hit = boundsList
+      .filter((b) => cx >= b.x1 && cx <= b.x2 && cy >= b.y1 && cy <= b.y2)
+      .sort(
+        (a, b) =>
+          (a.x2 - a.x1) * (a.y2 - a.y1) - (b.x2 - b.x1) * (b.y2 - b.y1),
+      )[0]
+    const targetId = hit?.g.id ?? null
+    if (targetId === currentGroup?.id) continue
+    changed = true
+    if (currentGroup) {
+      const arr = removeMap.get(currentGroup.id) ?? []
+      arr.push(id)
+      removeMap.set(currentGroup.id, arr)
+    }
+    if (targetId) {
+      const arr = addMap.get(targetId) ?? []
+      arr.push(id)
+      addMap.set(targetId, arr)
+    }
+  }
+  if (!changed) return null
+  return { addMap, removeMap }
 }
 
 export const useCanvasStore = create<CanvasStore>((set, get) => ({
@@ -194,6 +300,7 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
   snapToGrid: false,
   toast: null,
   guides: { vertical: [], horizontal: [] },
+  groupDragHint: null,
 
   /* 结构性变更前调用：快照当前状态入历史栈 */
   commit: () => {
@@ -662,91 +769,17 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
    */
   syncGroupMemberships: (nodeIds) => {
     const { nodes, groups } = get()
-    const expanded = groups.filter((g) => !g.collapsed)
-    if (expanded.length === 0) return null
-
-    const sizeOf = (n: Node<CanvasNodeData>) => ({
-      w: n.measured?.width ?? NODE_SPECS[n.type ?? '']?.width ?? 280,
-      h: n.measured?.height ?? 120,
-    })
-    const PAD_X = 28
-    const PAD_TOP = 44
-    const PAD_BOTTOM = 28
-
-    const draggedSet = new Set(nodeIds)
-
-    const boundsList = expanded
-      .map((g) => {
-        let minX = Infinity
-        let minY = Infinity
-        let maxX = -Infinity
-        let maxY = -Infinity
-        for (const id of g.nodeIds) {
-          // 排除被拖拽节点：残余成员定义框体，拖出的节点才能判定为框外
-          if (draggedSet.has(id)) continue
-          const n = nodes.find((x) => x.id === id)
-          if (!n) continue
-          const { w, h } = sizeOf(n)
-          minX = Math.min(minX, n.position.x)
-          minY = Math.min(minY, n.position.y)
-          maxX = Math.max(maxX, n.position.x + w)
-          maxY = Math.max(maxY, n.position.y + h)
-        }
-        if (minX === Infinity) return null
-        return {
-          g,
-          x1: minX - PAD_X,
-          y1: minY - PAD_TOP,
-          x2: maxX + PAD_X,
-          y2: maxY + PAD_BOTTOM,
-        }
-      })
-      .filter((x): x is NonNullable<typeof x> => !!x)
-    // boundsList 可能为空（如分组仅剩被拖节点）：
-    // 此时被拖成员的中心不命中任何框 → 判定为拖出，分组随之解散
-
-    const addMap = new Map<string, string[]>()
-    const removeMap = new Map<string, string[]>()
-    let changed = false
-
-    for (const id of nodeIds) {
-      const n = nodes.find((x) => x.id === id)
-      if (!n || n.hidden) continue
-      const { w, h } = sizeOf(n)
-      const cx = n.position.x + w / 2
-      const cy = n.position.y + h / 2
-      const currentGroup = groups.find((g) => g.nodeIds.includes(id))
-      // 命中的分组取面积最小者（避免嵌套大框抢占）
-      const hit = boundsList
-        .filter((b) => cx >= b.x1 && cx <= b.x2 && cy >= b.y1 && cy <= b.y2)
-        .sort(
-          (a, b) =>
-            (a.x2 - a.x1) * (a.y2 - a.y1) - (b.x2 - b.x1) * (b.y2 - b.y1),
-        )[0]
-      const targetId = hit?.g.id ?? null
-      if (targetId === currentGroup?.id) continue
-      changed = true
-      if (currentGroup) {
-        const arr = removeMap.get(currentGroup.id) ?? []
-        arr.push(id)
-        removeMap.set(currentGroup.id, arr)
-      }
-      if (targetId) {
-        const arr = addMap.get(targetId) ?? []
-        arr.push(id)
-        addMap.set(targetId, arr)
-      }
-    }
-    if (!changed) return null
+    const plan = planGroupMembership(nodes, groups, nodeIds)
+    if (!plan) return null
 
     get().commit()
     let nextGroups = groups.map((g) => ({ ...g, nodeIds: [...g.nodeIds] }))
-    removeMap.forEach((ids, gid) => {
+    plan.removeMap.forEach((ids, gid) => {
       nextGroups = nextGroups.map((g) =>
         g.id === gid ? { ...g, nodeIds: g.nodeIds.filter((x) => !ids.includes(x)) } : g,
       )
     })
-    addMap.forEach((ids, gid) => {
+    plan.addMap.forEach((ids, gid) => {
       nextGroups = nextGroups.map((g) =>
         g.id === gid ? { ...g, nodeIds: [...g.nodeIds, ...ids] } : g,
       )
@@ -762,14 +795,14 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
     }
     set({ groups: nextGroups, dirty: true })
 
-    const added = [...addMap.values()].reduce((a, b) => a + b.length, 0)
-    const removed = [...removeMap.values()].reduce((a, b) => a + b.length, 0)
+    const added = [...plan.addMap.values()].reduce((a, b) => a + b.length, 0)
+    const removed = [...plan.removeMap.values()].reduce((a, b) => a + b.length, 0)
     const parts: string[] = []
-    addMap.forEach((ids, gid) => {
+    plan.addMap.forEach((ids, gid) => {
       const g = nextGroups.find((x) => x.id === gid)
       if (g) parts.push(`${ids.length} 个节点加入「${g.name}」`)
     })
-    removeMap.forEach((ids, gid) => {
+    plan.removeMap.forEach((ids, gid) => {
       const g = nextGroups.find((x) => x.id === gid)
       if (g) parts.push(`${ids.length} 个节点移出「${g.name}」`)
     })
@@ -780,6 +813,23 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
     }
     if (parts.length > 0) get().showToast('success', parts.join('，'))
     return { added, removed }
+  },
+
+  /** 拖拽中实时预览：拖拽节点对分组框的加入/移出提示（与 syncGroupMemberships 同一几何规划） */
+  computeGroupDragHint: (nodeIds) => {
+    const { nodes, groups } = get()
+    const plan = planGroupMembership(nodes, groups, nodeIds)
+    if (!plan) return null
+    /* 多分组同时命中时取变更节点数最多者（拖拽提示一次只强调一个框体） */
+    let best: { groupId: string; action: 'add' | 'remove'; weight: number } | null = null
+    plan.addMap.forEach((ids, gid) => {
+      if (!best || ids.length > best.weight) best = { groupId: gid, action: 'add', weight: ids.length }
+    })
+    plan.removeMap.forEach((ids, gid) => {
+      const w = ids.length + 0.5 // 移出（可能伴随解散）稍优先展示
+      if (!best || w > best.weight) best = { groupId: gid, action: 'remove', weight: w }
+    })
+    return best ? { groupId: best.groupId, action: best.action } : null
   },
 
   setEdges: (edges) => set({ edges, dirty: true }),
@@ -832,6 +882,12 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
   setSnapToGrid: (v) => set({ snapToGrid: v }),
   setGuides: (g) =>
     set({ guides: g ?? { vertical: [], horizontal: [] } }),
+  setGroupDragHint: (h) => {
+    const prev = get().groupDragHint
+    /* 值未变化时跳过 set，避免拖拽中高频触发重渲染 */
+    if (prev?.groupId === h?.groupId && prev?.action === h?.action) return
+    set({ groupDragHint: h })
+  },
   showToast: (type, message) => set({ toast: { type, message } }),
   clearToast: () => set({ toast: null }),
 }))
