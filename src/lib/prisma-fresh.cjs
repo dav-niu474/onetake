@@ -30,12 +30,12 @@ module.exports = function loadFreshPrismaClient() {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const mod = require('@prisma/client')
   const probe = new mod.PrismaClient()
-  const ok = typeof probe.providerSetting === 'object'
+  const ok = typeof probe.providerSetting === 'object' && typeof probe.providerAccount === 'object'
   try {
     void probe.$disconnect()
   } catch {
     /* ignore */
   }
-  if (!ok) throw new Error('fresh prisma client still missing providerSetting')
+  if (!ok) throw new Error('fresh prisma client still missing providerAccount')
   return mod.PrismaClient
 }

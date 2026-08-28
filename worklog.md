@@ -897,3 +897,72 @@ Task: 模型供应商配置系统 + 场景模板扩展 + 代码仓产品链接
 1. 用户提供产品 URL 后填入 README/About；或部署 Vercel（需 DB 迁移为托管 SQLite/Postgres）
 2. 视频供应商扩展：支持自定义视频生成 API（提交+轮询两段式配置化）
 3. tv3 补跑 → 三幕成片闭环（配额释放后）
+
+---
+
+## Task ID: 16 — 模型服务 v2：供应商预置目录 + Key 拉取模型列表 + 测试通过才保存
+Agent: main (Z.ai Code)
+Task: 按用户要求升级模型服务配置——预置常见供应商（参考 Cherry Studio / LobeChat / new-api），输入 API Key 后直接获取支持的模型列表，测试连接正常才允许保存
+
+### 项目当前状态描述/判断
+- Task 15 的 v1 配置是「按能力槽位裸填 baseUrl/key/model」，无供应商概念、无模型列表拉取
+- 本轮重构为「供应商账户（ProviderAccount）+ 能力路由（ProviderSetting）」双层模型，全链路已在浏览器实测
+
+### 已完成内容
+
+**数据模型（prisma/schema.prisma，SCHEMA_VERSION v4→v5）**
+- 新表 `ProviderAccount`：presetId（预置 id / custom）、name、protocol（openai|anthropic|gemini）、baseUrl、apiKey、models(JSON)、enabled、status（unverified|ok|error）、statusMessage、latencyMs
+- `ProviderSetting` 语义升级为纯能力路由：+accountId 字段；providerKind: builtin | account | openai_compatible(legacy)
+- **旧数据自动迁移**：首次 GET /api/providers 时把 v1 openai_compatible 直填行转换为 ProviderAccount 并重接路由（实测通过：尾斜杠归一化 + key 掩码正确）
+
+**预置供应商目录（src/lib/ai-canvas/provider-presets.ts）**
+- 15 家预置：OpenAI / DeepSeek / 智谱 BigModel / 阿里云百炼 / Kimi / MiniMax / 火山方舟(豆包) / 硅基流动 / OpenRouter / Groq / xAI / Anthropic(Claude) / Google Gemini / Ollama(本地免key) / LM Studio(本地免key)
+- 每家含：官方 baseUrl、API Key 申请入口链接、支持能力标签（对话/生图/配音）、品牌渐变徽标、中英文描述
+- 三协议定义：openai（覆盖绝大多数）/ anthropic / gemini
+
+**协议适配层（src/lib/ai-canvas/provider-protocol.ts，服务端）**
+- fetchModelList：三协议拉取模型列表（openai GET /models；anthropic GET /v1/models + x-api-key；gemini GET /v1beta/models?key=，过滤 generateContent 支持）
+- callChat：三协议文本生成（openai chat/completions；anthropic /v1/messages 含 max_tokens 必填与 system 分离；gemini :generateContent + systemInstruction）
+- 15s 超时保护；错误统一中文映射（401/403 鉴权失败、404 检查 Base URL 是否少 /v1、429 限流）
+
+**API（/api/providers）**
+- GET：legacy 迁移 + accounts（apiKey 永远脱敏 sk-***xxxx）+ capabilities（4 能力路由视图含账户名/协议）
+- POST：账户 upsert（apiKey '' 保留 / '-' 清除；本地 localhost 免 key；保存时携带测试结果）
+- PUT：能力路由（capability → builtin|account + model + voice + enabled）
+- DELETE /api/providers/[id]：删除账户并**级联重置**引用它的能力路由为内置（实测通过）
+- POST /api/providers/fetch-models：测试连接=拉模型列表（无副作用；密钥留空时回退已存密钥，不回传明文）
+- 删除旧 /api/settings/providers（其 test 子路由本就 404，属 Task 15 遗留 bug，本轮自然消灭）
+
+**执行引擎集成（runner.ts + provider-config.ts）**
+- getProviderConfig 解析 account 分支 → ResolvedProvider{protocol,baseUrl,apiKey,model,voice,accountName}；30s 缓存 + 变更主动失效
+- callCustomLLM 按协议分发到 provider-protocol.callChat；图像/TTS 仅放行 openai 协议（其余给出明确中文报错）
+- 节点阶段文案升级：「使用 Mock 工作室 · mock-prompt-master…」（账户名 · 模型名）
+
+**设置 UI 重构（settings-dialog.tsx，双 Tab）**
+- Tab「模型服务」：左列 = 内置智谱卡（固定置顶）+ 已配置账户（状态点：绿 ok/红 error/灰未验证，停用半透明）+ 添加供应商；右侧编辑器 = 预置信息头（徽标/描述/能力标签）+ 名称/协议（预置锁定）/Base URL/API Key（掩码 placeholder + 「获取密钥」外链）+「测试连接并获取模型」+ 启用开关 + 模型列表（搜索/计数/手动添加/移除）+ 危险区二次确认删除
+- 保存守门：未验证/失败/key 或 baseUrl 变更时，保存自动先跑测试，**测试通过才写库**（用户核心诉求）
+- 预置选择器（二层 Dialog）：搜索 + 15 卡网格（已添加置灰标记）+ 自定义供应商入口
+- Tab「能力路由」：4 能力行，供应商下拉按协议支持能力过滤（anthropic/gemini 账户不会出现在图像/TTS 行），模型下拉取自账户 models（空则手输），TTS 音色输入，视频行锁定内置说明
+- dev 热更支持：db.ts SCHEMA_VERSION 机制 v5 + prisma-fresh.cjs probe 校验 providerAccount
+
+### 验证结果（agent-browser 端到端实测）
+- lint 0 错误；应用 200；无 console 错误
+- 预置目录渲染 15 家 + 自定义 ✓；DeepSeek 预置带入（名称/协议锁定/BaseUrl/keyUrl 链接）✓
+- 未填 key 时测试按钮禁用 ✓；假 key 测试 → 真实出网 → 红条「鉴权失败：API Key 无效或无权限（HTTP 401）」✓
+- 保存守门：失败状态点保存 → 不写库 ✓
+- 本地 mock OpenAI（mini-services/mock-openai:8123）→ 测试成功绿条「连接正常，获取到 3 个模型 13ms」+ 模型列表自动填充 ✓ → 保存成功入左列表 ✓
+- 能力路由选 Mock 工作室 × mock-prompt-master 保存 ✓（API 回读确认）
+- **终极闭环**：画布运行提示词优化节点 → 输出为 mock 特征文本（【mock 扩写】…），证明执行引擎按新供应商体系真实调用 ✓
+- 测试数据已清理（账户删除 + 路由级联重置 + 画布 reload 恢复空态），mock 服务进程已停止（目录保留作为开发测试基建）
+
+### 未解决问题 / 风险
+- 视频/图生图仍仅内置智谱（各平台协议差异大，扩展点已在 ProviderAccount 预留——可后续加「两段式提交+轮询」配置化接入）
+- gemini/anthropic 仅开放 chat（图像协议不通用，UI 已过滤不让选）
+- 沙箱内无真实第三方 key，DeepSeek 401 已验证错误路径；真实成功路径由 mock 服务等效验证
+- 产品公网链接仍待用户提供 URL 后写入 README/About
+
+### 下一轮建议（优先级从高到低）
+1. 用户提供真实供应商 key 后在 UI 实测一家（DeepSeek/硅基流动性价比高）
+2. 视频供应商配置化接入（提交+轮询两段式），打通完整多供应商视频链路
+3. 节点级模型覆写（同一能力下不同节点可用不同模型）；供应商余额/用量查询
+4. 产品 URL 部署与 README/About 填写

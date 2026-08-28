@@ -1,11 +1,16 @@
 'use client'
 
 /**
- * 模型服务配置对话框：按能力维度（LLM / 图像 / TTS / 视频）配置模型供应商，
- * 支持 OpenAI 兼容协议自定义接入（Base URL + API Key + 模型名），
- * 保存后执行引擎按能力路由；视频暂锁定内置智谱。
+ * 模型服务设置对话框（v2：供应商预置体系）
+ *
+ * Tab1 模型服务：左侧 = 内置服务 + 已配置供应商列表 +「添加供应商」；
+ *   点击预置目录卡片新建账户 → 填 API Key → 「测试连接并获取模型列表」（拉取即验证连通与鉴权）
+ *   → 测试通过方可保存（未测试时保存会先自动测试）。支持手动补充模型名、本地服务免密钥。
+ * Tab2 能力路由：4 个能力（LLM/图像/TTS/视频）各自指向「内置智谱」或某供应商账户的某模型。
+ *
+ * 密钥仅保存于本机 SQLite，接口一律脱敏返回，绝不明文回显。
  */
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Dialog,
   DialogContent,
@@ -35,86 +40,159 @@ import {
   XCircle,
   Lock,
   KeyRound,
+  Plus,
+  Search,
+  ExternalLink,
+  Trash2,
+  Cpu,
+  MessageSquareText,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/lib/ai-canvas/store'
+import {
+  ABILITY_LABEL,
+  BUILTIN_PRESET,
+  CUSTOM_PRESET_ID,
+  PROVIDER_PRESETS,
+  PROTOCOL_LABEL,
+  getPreset,
+  protocolAbilities,
+  type ProviderAbility,
+  type ProviderPreset,
+  type ProviderProtocol,
+} from '@/lib/ai-canvas/provider-presets'
 
 type Capability = 'llm' | 'image' | 'tts' | 'video'
 
 const CAPS: Capability[] = ['llm', 'image', 'tts', 'video']
+const CAP_OF_ABILITY: Record<ProviderAbility, Capability> = {
+  chat: 'llm',
+  image: 'image',
+  tts: 'tts',
+  video: 'video',
+}
 
-interface ProviderView {
-  capability: Capability
-  providerKind: string
+interface AccountView {
+  id: string
+  presetId: string
+  name: string
+  protocol: string
   baseUrl: string
   apiKeyMask: string
   hasKey: boolean
+  models: string[]
+  enabled: boolean
+  status: string // unverified | ok | error
+  statusMessage: string
+  latencyMs: number | null
+  updatedAt: string
+}
+
+interface CapabilityRoute {
+  capability: Capability
+  providerKind: string
+  accountId: string | null
+  accountName: string
   model: string
   voice: string
   enabled: boolean
+  protocol: string | null
 }
 
+/** 账户编辑草稿（apiKey：'' = 保留原值；hasKeyRetained/keyMask = 服务端已存密钥的只读快照） */
 interface Draft {
-  providerKind: 'builtin' | 'openai_compatible'
+  id: string | null
+  presetId: string
+  name: string
+  protocol: ProviderProtocol
   baseUrl: string
-  apiKey: string // '' = 不修改；'-' = 清除；其他 = 覆盖
+  apiKey: string
+  models: string[]
+  enabled: boolean
+  status: string
+  statusMessage: string
+  latencyMs: number | null
+  /** 服务端已保存过密钥（前端不持有明文，留空即保留） */
+  hasKeyRetained: boolean
+  /** 已保存密钥的掩码展示 */
+  keyMask: string
+}
+
+interface RouteDraft {
+  providerKind: 'builtin' | 'account'
+  accountId: string
   model: string
   voice: string
   enabled: boolean
-}
-
-interface TestState {
-  status: 'testing' | 'ok' | 'fail'
-  message: string
-  latencyMs?: number
 }
 
 const CAP_META: Record<
   Capability,
-  { title: string; desc: string; icon: React.ReactNode; accent: string; customDesc: string }
+  { title: string; desc: string; icon: React.ReactNode; accent: string; ability: ProviderAbility }
 > = {
   llm: {
     title: '文本生成 LLM',
-    desc: '提示词优化（enhancer 节点）',
+    desc: '提示词优化 / 剧本扩写',
     icon: <Sparkles className="h-3.5 w-3.5" />,
     accent: 'text-emerald-300',
-    customDesc: 'OpenAI 兼容 /chat/completions，用于提示词扩写',
+    ability: 'chat',
   },
   image: {
     title: '图像生成',
-    desc: '文生图（imageGen 节点）',
+    desc: '文生图节点（OpenAI 兼容）',
     icon: <ImageIcon className="h-3.5 w-3.5" />,
     accent: 'text-violet-300',
-    customDesc: 'OpenAI 兼容 /images/generations，兼容 b64_json 与 url 响应',
+    ability: 'image',
   },
   tts: {
     title: '语音合成 TTS',
-    desc: '文案转配音（tts 节点）',
+    desc: 'AI 配音节点（OpenAI 兼容）',
     icon: <AudioLines className="h-3.5 w-3.5" />,
     accent: 'text-rose-300',
-    customDesc: 'OpenAI 兼容 /audio/speech，输出二进制音频（默认 wav）',
+    ability: 'tts',
   },
   video: {
     title: '视频生成',
     desc: '文生视频 / 图生视频',
     icon: <Film className="h-3.5 w-3.5" />,
     accent: 'text-amber-300',
-    customDesc: '',
+    ability: 'video',
   },
 }
 
-function emptyDraft(): Draft {
-  return { providerKind: 'builtin', baseUrl: '', apiKey: '', model: '', voice: '', enabled: true }
+function newDraftFromPreset(p: ProviderPreset): Draft {
+  return {
+    id: null,
+    presetId: p.id,
+    name: p.name,
+    protocol: p.protocol,
+    baseUrl: p.baseUrl,
+    apiKey: '',
+    models: [],
+    enabled: true,
+    status: 'unverified',
+    statusMessage: '',
+    latencyMs: null,
+    hasKeyRetained: false,
+    keyMask: '',
+  }
 }
 
-function draftOf(v: ProviderView): Draft {
+function draftOfView(v: AccountView): Draft {
   return {
-    providerKind: v.providerKind === 'openai_compatible' ? 'openai_compatible' : 'builtin',
-    baseUrl: v.baseUrl ?? '',
+    id: v.id,
+    presetId: v.presetId,
+    name: v.name,
+    protocol: (v.protocol as ProviderProtocol) || 'openai',
+    baseUrl: v.baseUrl,
     apiKey: '',
-    model: v.model ?? '',
-    voice: v.voice ?? '',
+    models: [...v.models],
     enabled: v.enabled,
+    status: v.status,
+    statusMessage: v.statusMessage,
+    latencyMs: v.latencyMs,
+    hasKeyRetained: v.hasKey,
+    keyMask: v.apiKeyMask,
   }
 }
 
@@ -123,396 +201,1126 @@ export function SettingsDialog() {
   const setOpen = useCanvasStore((s) => s.setSettingsOpen)
   const showToast = useCanvasStore((s) => s.showToast)
 
-  const [views, setViews] = useState<Record<Capability, ProviderView> | null>(null)
-  const [drafts, setDrafts] = useState<Record<Capability, Draft> | null>(null)
+  const [tab, setTab] = useState<'accounts' | 'routing'>('accounts')
+  const [accounts, setAccounts] = useState<AccountView[] | null>(null)
+  const [routes, setRoutes] = useState<CapabilityRoute[] | null>(null)
   const [loading, setLoading] = useState(false)
-  const [saving, setSaving] = useState(false)
-  const [tests, setTests] = useState<Partial<Record<Capability, TestState>>>({})
 
-  const refresh = async () => {
+  // 账户编辑
+  const [selectedId, setSelectedId] = useState<string | 'builtin' | null>(null)
+  const [draft, setDraft] = useState<Draft | null>(null)
+  const [isNew, setIsNew] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [modelSearch, setModelSearch] = useState('')
+  const [newModel, setNewModel] = useState('')
+  const [pickerOpen, setPickerOpen] = useState(false)
+
+  // 能力路由草稿
+  const [routeDrafts, setRouteDrafts] = useState<Record<Capability, RouteDraft> | null>(null)
+  const [savingRoutes, setSavingRoutes] = useState(false)
+
+  const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      const res = await fetch('/api/settings/providers', { cache: 'no-store' })
-      const j = (await res.json()) as { items?: ProviderView[]; error?: string }
-      if (!res.ok) throw new Error(j.error || '读取配置失败')
-      const nextViews = {} as Record<Capability, ProviderView>
-      const nextDrafts = {} as Record<Capability, Draft>
-      for (const cap of CAPS) {
-        const item = (j.items ?? []).find((i) => i.capability === cap)
-        if (item) {
-          nextViews[cap] = item
-          nextDrafts[cap] = draftOf(item)
-        } else {
-          nextViews[cap] = {
-            capability: cap,
-            providerKind: 'builtin',
-            baseUrl: '',
-            apiKeyMask: '',
-            hasKey: false,
-            model: '',
-            voice: '',
-            enabled: true,
-          }
-          nextDrafts[cap] = emptyDraft()
-        }
-      }
-      setViews(nextViews)
-      setDrafts(nextDrafts)
-      setTests({})
+      const res = await fetch('/api/providers', { cache: 'no-store' })
+      const j = (await res.json()) as { accounts?: AccountView[]; capabilities?: CapabilityRoute[]; error?: string }
+      if (!res.ok) throw new Error(j.error || '读取供应商配置失败')
+      const list = j.accounts ?? []
+      const caps = j.capabilities ?? []
+      setAccounts(list)
+      setRoutes(caps)
+      setRouteDrafts(fromRoutes(caps))
+      return list
     } catch (e) {
-      showToast('error', e instanceof Error ? e.message : '读取模型服务配置失败')
+      showToast('error', e instanceof Error ? e.message : '读取供应商配置失败')
+      return []
     } finally {
       setLoading(false)
     }
-  }
+  }, [showToast])
 
   useEffect(() => {
-    if (open) void refresh()
-  }, [open])
+    if (open) {
+      setTab('accounts')
+      setPickerOpen(false)
+      setConfirmDelete(false)
+      void refresh().then((list) => {
+        if (list.length > 0) {
+          setSelectedId(list[0].id)
+          setDraft(draftOfView(list[0]))
+        } else {
+          setSelectedId('builtin')
+          setDraft(null)
+        }
+        setIsNew(false)
+      })
+    }
+  }, [open, refresh])
 
-  const updateDraft = (cap: Capability, patch: Partial<Draft>) => {
-    setDrafts((prev) => (prev ? { ...prev, [cap]: { ...prev[cap], ...patch } } : prev))
+  /* ------------------------------ 账户操作 ------------------------------ */
+
+  const selectAccount = (v: AccountView) => {
+    setSelectedId(v.id)
+    setDraft(draftOfView(v))
+    setIsNew(false)
+    setConfirmDelete(false)
+    setModelSearch('')
+    setNewModel('')
   }
 
-  /** 测试连接：用当前表单值（密钥留空时服务端自动回退已保存密钥） */
-  const runTest = async (cap: Capability) => {
-    if (!drafts) return
-    const d = drafts[cap]
-    setTests((prev) => ({ ...prev, [cap]: { status: 'testing', message: '正在测试连接…' } }))
+  const selectBuiltin = () => {
+    setSelectedId('builtin')
+    setDraft(null)
+    setIsNew(false)
+  }
+
+  const startNew = (preset: ProviderPreset) => {
+    setSelectedId(null)
+    setDraft(newDraftFromPreset(preset))
+    setIsNew(true)
+    setPickerOpen(false)
+    setConfirmDelete(false)
+    setModelSearch('')
+    setNewModel('')
+  }
+
+  const patchDraft = (patch: Partial<Draft>) => {
+    setDraft((prev) => (prev ? { ...prev, ...patch } : prev))
+  }
+
+  /** 测试连接并获取模型列表（拉取成功 = 连通 + 鉴权通过） */
+  const runTest = async (): Promise<{ ok: boolean; models: string[]; latencyMs: number | null; message: string }> => {
+    if (!draft) return { ok: false, models: [], latencyMs: null, message: '未选择账户' }
+    setTesting(true)
     try {
-      const res = await fetch('/api/settings/providers/test', {
+      const res = await fetch('/api/providers/fetch-models', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          capability: cap,
-          baseUrl: d.baseUrl,
-          ...(d.apiKey.trim() !== '' ? { apiKey: d.apiKey.trim() } : {}),
-          model: d.model,
+          protocol: draft.protocol,
+          baseUrl: draft.baseUrl,
+          // 密钥留空且是已保存账户 → 服务端用已存密钥
+          ...(draft.apiKey.trim() !== '' ? { apiKey: draft.apiKey.trim() } : {}),
+          ...(draft.id ? { accountId: draft.id } : {}),
         }),
       })
-      const j = (await res.json()) as { ok?: boolean; message?: string; latencyMs?: number }
-      setTests((prev) => ({
-        ...prev,
-        [cap]: {
-          status: j.ok ? 'ok' : 'fail',
-          message: j.message || (j.ok ? '连接成功' : '连接失败'),
-          latencyMs: j.latencyMs,
-        },
-      }))
+      const j = (await res.json()) as { ok?: boolean; models?: string[]; latencyMs?: number; message?: string; error?: string }
+      if (j.ok) {
+        const models = j.models ?? []
+        patchDraft({
+          models: Array.from(new Set([...models, ...draft.models])),
+          status: 'ok',
+          statusMessage: j.message ?? '连接正常',
+          latencyMs: j.latencyMs ?? null,
+        })
+        return { ok: true, models, latencyMs: j.latencyMs ?? null, message: j.message ?? '连接正常' }
+      }
+      patchDraft({ status: 'error', statusMessage: j.error ?? '测试失败', latencyMs: null })
+      return { ok: false, models: [], latencyMs: null, message: j.error ?? '测试失败' }
     } catch {
-      setTests((prev) => ({
-        ...prev,
-        [cap]: { status: 'fail', message: '测试请求发送失败，请检查网络' },
-      }))
+      const msg = '测试请求发送失败，请检查网络'
+      patchDraft({ status: 'error', statusMessage: msg, latencyMs: null })
+      return { ok: false, models: [], latencyMs: null, message: msg }
+    } finally {
+      setTesting(false)
     }
   }
 
-  /** 保存：逐能力 PUT（apiKey 留空=保留原值） */
-  const saveAll = async () => {
-    if (!drafts) return
+  /** 保存：未验证时自动先测试（测试通过才保存） */
+  const save = async () => {
+    if (!draft) return
     setSaving(true)
     try {
-      const errors: string[] = []
-      for (const cap of CAPS) {
-        const d = drafts[cap]
-        const res = await fetch('/api/settings/providers', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            capability: cap,
-            providerKind: cap === 'video' ? 'builtin' : d.providerKind,
-            baseUrl: d.providerKind === 'openai_compatible' && cap !== 'video' ? d.baseUrl : '',
-            apiKey: d.apiKey, // ''=保留；'-'=清除；新值=覆盖
-            model: d.model,
-            voice: d.voice,
-            enabled: d.enabled,
-          }),
-        })
-        const j = (await res.json().catch(() => ({}))) as { error?: string }
-        if (!res.ok) {
-          errors.push(`${CAP_META[cap].title}：${j.error || '保存失败'}`)
+      const name = draft.name.trim()
+      if (!name) {
+        showToast('error', '请填写供应商名称')
+        return
+      }
+      if (!draft.baseUrl.trim()) {
+        showToast('error', '请填写 Base URL')
+        return
+      }
+      const preset = getPreset(draft.presetId)
+      const needKey = preset ? preset.needKey : !/^http:\/\/(localhost|127\.0\.0\.1)/.test(draft.baseUrl)
+      if (needKey && !draft.hasKeyRetained && draft.apiKey.trim() === '') {
+        showToast('error', '请填写 API Key（本地服务除外）')
+        return
+      }
+
+      // 需要重新测试的情形：未验证过 / 处于失败态 / 关键字段有改动
+      let d: Draft = { ...draft, name }
+      const keyChanged = draft.apiKey.trim() !== ''
+      const testedNow = draft.status !== 'ok' || keyChanged
+      if (testedNow) {
+        showToast('info', '正在测试连接，通过后自动保存…')
+        const r = await runTest()
+        if (!r.ok) {
+          showToast('error', `测试未通过，未保存：${r.message}`)
+          return
         }
+        // runTest 已 patchDraft；取最新快照
+        d = { ...d, status: 'ok', latencyMs: r.latencyMs, statusMessage: r.message }
       }
-      if (errors.length > 0) {
-        showToast('error', errors[0])
-      } else {
-        showToast('success', '模型服务配置已保存，后续执行将按此路由')
+
+      const res = await fetch('/api/providers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...(d.id ? { id: d.id } : {}),
+          presetId: d.presetId,
+          name: d.name,
+          protocol: d.protocol,
+          baseUrl: d.baseUrl,
+          apiKey: d.apiKey, // '' = 保留原值
+          models: d.models,
+          enabled: d.enabled,
+          status: d.status,
+          statusMessage: d.statusMessage,
+          latencyMs: d.latencyMs,
+        }),
+      })
+      const j = (await res.json()) as { ok?: boolean; item?: AccountView; error?: string; message?: string }
+      if (!res.ok || !j.ok || !j.item) {
+        throw new Error(j.error || '保存失败')
       }
+      showToast('success', j.message ?? '供应商已保存')
       await refresh()
-    } catch {
-      showToast('error', '保存模型服务配置失败，请稍后重试')
+      setSelectedId(j.item.id)
+      setDraft(draftOfView(j.item))
+      setIsNew(false)
+    } catch (e) {
+      showToast('error', e instanceof Error ? e.message : '保存供应商失败')
     } finally {
       setSaving(false)
     }
   }
 
-  const dirty = (() => {
-    if (!views || !drafts) return false
-    return CAPS.some((cap) => {
-      const v = views[cap]
-      const d = drafts[cap]
-      return (
-        d.providerKind !== (v.providerKind === 'openai_compatible' ? 'openai_compatible' : 'builtin') ||
-        d.baseUrl !== (v.baseUrl ?? '') ||
-        d.apiKey.trim() !== '' ||
-        d.model !== (v.model ?? '') ||
-        d.voice !== (v.voice ?? '') ||
-        d.enabled !== v.enabled
-      )
-    })
-  })()
+  const remove = async () => {
+    if (!draft?.id) return
+    if (!confirmDelete) {
+      setConfirmDelete(true)
+      return
+    }
+    setSaving(true)
+    try {
+      const res = await fetch(`/api/providers/${draft.id}`, { method: 'DELETE' })
+      const j = (await res.json()) as { ok?: boolean; message?: string; error?: string }
+      if (!res.ok || !j.ok) throw new Error(j.error || '删除失败')
+      showToast('success', j.message ?? '已删除')
+      await refresh()
+      selectBuiltin()
+    } catch (e) {
+      showToast('error', e instanceof Error ? e.message : '删除供应商失败')
+    } finally {
+      setSaving(false)
+      setConfirmDelete(false)
+    }
+  }
+
+  /* ------------------------------ 能力路由操作 ------------------------------ */
+
+  const patchRoute = (cap: Capability, patch: Partial<RouteDraft>) => {
+    setRouteDrafts((prev) => (prev ? { ...prev, [cap]: { ...prev[cap], ...patch } } : prev))
+  }
+
+  const saveRoutes = async () => {
+    if (!routeDrafts) return
+    setSavingRoutes(true)
+    try {
+      const errors: string[] = []
+      for (const cap of CAPS) {
+        const r = routeDrafts[cap]
+        const res = await fetch('/api/providers', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            capability: cap,
+            providerKind: r.providerKind,
+            ...(r.providerKind === 'account' ? { accountId: r.accountId } : {}),
+            model: r.model,
+            voice: r.voice,
+            enabled: r.enabled,
+          }),
+        })
+        const j = (await res.json().catch(() => ({}))) as { error?: string }
+        if (!res.ok) errors.push(`${CAP_META[cap].title}：${j.error || '保存失败'}`)
+      }
+      if (errors.length > 0) showToast('error', errors[0])
+      else showToast('success', '能力路由已保存，节点执行将按此调用')
+      await refresh()
+    } catch {
+      showToast('error', '保存能力路由失败，请稍后重试')
+    } finally {
+      setSavingRoutes(false)
+    }
+  }
+
+  /* ------------------------------ 渲染 ------------------------------ */
+
+  const selectedAccount = accounts?.find((a) => a.id === selectedId) ?? null
+  const filteredModels = useMemo(() => {
+    if (!draft) return []
+    const kw = modelSearch.trim().toLowerCase()
+    const list = [...draft.models].sort((a, b) => a.localeCompare(b))
+    return kw ? list.filter((m) => m.toLowerCase().includes(kw)) : list
+  }, [draft, modelSearch])
+
+  const presetAdded = (presetId: string) => accounts?.some((a) => a.presetId === presetId) ?? false
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent className="border-zinc-800 bg-zinc-950 sm:max-w-2xl">
+      <DialogContent className="max-h-[88vh] overflow-hidden border-zinc-800 bg-zinc-950 sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-zinc-100">
             <Settings2 className="h-4 w-4 text-amber-300" />
-            模型服务配置
+            模型服务
           </DialogTitle>
           <DialogDescription className="text-zinc-500">
-            按能力维度接入自定义模型供应商（OpenAI 兼容协议）；未配置或关闭时使用内置智谱。密钥仅保存于本机数据库，不会明文回显。
+            预置主流供应商，填入 API Key 测试连接后即可使用；密钥仅存于本机数据库，不会明文回显。
           </DialogDescription>
         </DialogHeader>
 
-        {loading && !drafts ? (
-          <div className="space-y-2">
-            {[1, 2, 3, 4].map((i) => (
-              <div key={i} className="h-24 animate-pulse rounded-lg bg-zinc-900" />
-            ))}
-          </div>
-        ) : drafts && views ? (
-          <>
-            <ScrollArea className="max-h-[52vh] pr-2">
-              <div className="space-y-2.5">
-                {CAPS.map((cap) => (
-                  <CapabilityCard
-                    key={cap}
-                    cap={cap}
-                    view={views[cap]}
-                    draft={drafts[cap]}
-                    test={tests[cap]}
-                    disabled={saving}
-                    onChange={(patch) => updateDraft(cap, patch)}
-                    onTest={() => void runTest(cap)}
-                  />
-                ))}
-              </div>
-            </ScrollArea>
+        <div className="flex gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 p-1">
+          {(
+            [
+              { id: 'accounts', label: '模型服务', icon: <Cpu className="h-3.5 w-3.5" /> },
+              { id: 'routing', label: '能力路由', icon: <Settings2 className="h-3.5 w-3.5" /> },
+            ] as const
+          ).map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={cn(
+                'flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-medium transition',
+                tab === t.id
+                  ? 'bg-amber-500/15 text-amber-200 shadow-[inset_0_0_0_1px_rgba(245,158,11,0.3)]'
+                  : 'text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200',
+              )}
+            >
+              {t.icon}
+              {t.label}
+            </button>
+          ))}
+        </div>
 
-            <div className="flex items-center justify-between gap-2 border-t border-zinc-800 pt-3">
-              <p className="text-[10px] leading-relaxed text-zinc-600">
-                提示词优化失败会自动回落内置模型；图像 / 语音配置后执行即走自定义服务。
-              </p>
-              <div className="flex shrink-0 items-center gap-2">
-                {dirty && <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />}
-                <Button
-                  size="sm"
-                  onClick={() => void saveAll()}
-                  disabled={saving || loading}
-                  className="h-8 gap-1.5 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 px-3.5 text-[12px] font-semibold text-zinc-950 transition hover:from-amber-400 hover:to-orange-400"
+        {tab === 'accounts' ? (
+          <div className="flex h-[54vh] gap-3">
+            {/* 左列：内置 + 已配置 + 添加 */}
+            <aside className="flex w-48 shrink-0 flex-col gap-1.5">
+              <button
+                onClick={selectBuiltin}
+                className={cn(
+                  'flex items-center gap-2 rounded-lg border px-2.5 py-2 text-left transition',
+                  selectedId === 'builtin'
+                    ? 'border-amber-500/50 bg-amber-500/10'
+                    : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700',
+                )}
+              >
+                <span
+                  className={cn(
+                    'flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-gradient-to-br text-[11px] font-bold text-zinc-950',
+                    BUILTIN_PRESET.accent,
+                  )}
                 >
-                  {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <KeyRound className="h-3.5 w-3.5" />}
-                  保存配置
-                </Button>
+                  {BUILTIN_PRESET.badge}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[11px] font-medium text-zinc-200">{BUILTIN_PRESET.name}</span>
+                  <span className="block text-[9px] text-zinc-500">平台托管 · 免配置</span>
+                </span>
+              </button>
+
+              <div className="px-1 pt-1 text-[9px] font-medium uppercase tracking-wider text-zinc-600">
+                已配置供应商
               </div>
-            </div>
-          </>
-        ) : (
-          <div className="flex flex-col items-center gap-2 py-10 text-zinc-600">
-            <Settings2 className="h-8 w-8" />
-            <p className="text-xs">配置加载失败，关闭后重试</p>
+              <ScrollArea className="min-h-0 flex-1">
+                <div className="space-y-1.5 pr-1.5">
+                  {loading && !accounts && [1, 2, 3].map((i) => <div key={i} className="h-11 animate-pulse rounded-lg bg-zinc-900" />)}
+                  {accounts?.length === 0 && (
+                    <p className="px-1 py-2 text-[10px] leading-relaxed text-zinc-600">
+                      还没有接入供应商，点击下方「添加供应商」从预置目录开始。
+                    </p>
+                  )}
+                  {accounts?.map((a) => (
+                    <AccountListItem
+                      key={a.id}
+                      account={a}
+                      active={selectedId === a.id}
+                      onClick={() => selectAccount(a)}
+                    />
+                  ))}
+                </div>
+              </ScrollArea>
+
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setPickerOpen(true)}
+                className="h-8 w-full shrink-0 gap-1.5 border-dashed border-zinc-700 text-[11px] text-zinc-300 hover:border-amber-500/50 hover:bg-amber-500/10 hover:text-amber-200"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                添加供应商
+              </Button>
+            </aside>
+
+            {/* 右侧：详情 */}
+            <section className="min-w-0 flex-1">
+              <ScrollArea className="h-full pr-1.5">
+                {selectedId === 'builtin' ? (
+                  <BuiltinPane routes={routes} />
+                ) : draft ? (
+                  <AccountPane
+                    draft={draft}
+                    isNew={isNew}
+                    testing={testing}
+                    saving={saving}
+                    confirmDelete={confirmDelete}
+                    filteredModels={filteredModels}
+                    modelSearch={modelSearch}
+                    newModel={newModel}
+                    onPatch={patchDraft}
+                    onTest={() => void runTest()}
+                    onSave={() => void save()}
+                    onDelete={() => void remove()}
+                    onModelSearch={setModelSearch}
+                    onNewModel={setNewModel}
+                    onAddModel={() => {
+                      const m = newModel.trim()
+                      if (m && !draft.models.includes(m)) patchDraft({ models: [...draft.models, m] })
+                      setNewModel('')
+                    }}
+                    onRemoveModel={(m) => patchDraft({ models: draft.models.filter((x) => x !== m) })}
+                  />
+                ) : (
+                  <div className="flex h-full flex-col items-center justify-center gap-2 text-zinc-600">
+                    <PlugZap className="h-8 w-8" />
+                    <p className="text-xs">从左侧选择供应商，或点击「添加供应商」接入新服务</p>
+                  </div>
+                )}
+              </ScrollArea>
+            </section>
           </div>
+        ) : (
+          <RoutingPane
+            routes={routeDrafts}
+            accounts={accounts ?? []}
+            saving={savingRoutes}
+            onPatch={patchRoute}
+            onSave={() => void saveRoutes()}
+          />
         )}
+
+        {/* 预置选择器 */}
+        <PresetPicker
+          open={pickerOpen}
+          onOpenChange={setPickerOpen}
+          addedIds={accounts?.map((a) => a.presetId) ?? []}
+          onPick={(p) => startNew(p)}
+        />
       </DialogContent>
     </Dialog>
   )
 }
 
-/* ------------------------------ 能力分区卡片 ------------------------------ */
+/* ------------------------------ 左列账户项 ------------------------------ */
 
-function CapabilityCard({
-  cap,
-  view,
-  draft,
-  test,
-  disabled,
-  onChange,
-  onTest,
+function AccountListItem({
+  account,
+  active,
+  onClick,
 }: {
-  cap: Capability
-  view: ProviderView
-  draft: Draft
-  test?: TestState
-  disabled: boolean
-  onChange: (patch: Partial<Draft>) => void
-  onTest: () => void
+  account: AccountView
+  active: boolean
+  onClick: () => void
 }) {
-  const meta = CAP_META[cap]
-  const isVideo = cap === 'video'
-  const isCustom = draft.providerKind === 'openai_compatible' && !isVideo
-
+  const preset = getPreset(account.presetId)
+  const accent = preset?.accent ?? 'from-zinc-400 to-zinc-600'
+  const badge = preset?.badge ?? '⌘'
   return (
-    <div
+    <button
+      onClick={onClick}
       className={cn(
-        'rounded-lg border p-4 transition',
-        isVideo ? 'border-zinc-800/60 bg-zinc-900/30' : 'border-zinc-800 bg-zinc-900/60',
+        'flex w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-left transition',
+        active ? 'border-amber-500/50 bg-amber-500/10' : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700',
+        !account.enabled && 'opacity-50',
       )}
     >
-      {/* 头部：图标 + 标题 + 启用开关 */}
-      <div className="flex items-center gap-2">
-        <span className={meta.accent}>{meta.icon}</span>
-        <div className="min-w-0 flex-1">
-          <p className="text-[12px] font-medium text-zinc-200">
-            {meta.title}
-            {isVideo && <Lock className="ml-1.5 inline h-3 w-3 text-zinc-600" />}
-          </p>
-          <p className="text-[10px] text-zinc-600">{meta.desc}</p>
+      <span
+        className={cn(
+          'flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-gradient-to-br text-[10px] font-bold text-zinc-950',
+          accent,
+        )}
+      >
+        {badge}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[11px] font-medium text-zinc-200">{account.name}</span>
+        <span className="block truncate text-[9px] text-zinc-500">
+          {PROTOCOL_LABEL[account.protocol as ProviderProtocol] ?? account.protocol}
+          {account.models.length > 0 ? ` · ${account.models.length} 模型` : ''}
+        </span>
+      </span>
+      <StatusDot status={account.status} enabled={account.enabled} />
+    </button>
+  )
+}
+
+function StatusDot({ status, enabled }: { status: string; enabled: boolean }) {
+  if (!enabled) return <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-zinc-600" title="已停用" />
+  if (status === 'ok')
+    return <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]" title="连接正常" />
+  if (status === 'error') return <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-rose-500" title="上次测试失败" />
+  return <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-zinc-700" title="未验证" />
+}
+
+/* ------------------------------ 内置服务面板 ------------------------------ */
+
+function BuiltinPane({ routes }: { routes: CapabilityRoute[] | null }) {
+  return (
+    <div className="space-y-3">
+      <div className="rounded-lg border border-amber-500/25 bg-gradient-to-br from-amber-500/10 to-orange-500/5 p-4">
+        <div className="flex items-center gap-2.5">
+          <span
+            className={cn(
+              'flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br text-sm font-bold text-zinc-950',
+              BUILTIN_PRESET.accent,
+            )}
+          >
+            {BUILTIN_PRESET.badge}
+          </span>
+          <div className="min-w-0">
+            <p className="text-[13px] font-semibold text-zinc-100">{BUILTIN_PRESET.name}</p>
+            <p className="text-[10px] text-zinc-500">{BUILTIN_PRESET.nameEn}</p>
+          </div>
+          <span className="ml-auto flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[9px] text-emerald-300">
+            <CheckCircle2 className="h-3 w-3" /> 默认可用
+          </span>
         </div>
-        <label className="flex items-center gap-1.5 text-[10px] text-zinc-500">
+        <p className="mt-3 text-[11px] leading-relaxed text-zinc-400">{BUILTIN_PRESET.desc}</p>
+      </div>
+
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
+        <p className="mb-2.5 text-[11px] font-medium text-zinc-300">当前能力路由</p>
+        <div className="space-y-1.5">
+          {CAPS.map((cap) => {
+            const r = routes?.find((x) => x.capability === cap)
+            const usingBuiltin = !r || r.providerKind !== 'account' || !r.enabled
+            return (
+              <div key={cap} className="flex items-center gap-2 text-[11px]">
+                <span className={CAP_META[cap].accent}>{CAP_META[cap].icon}</span>
+                <span className="w-20 shrink-0 text-zinc-400">{CAP_META[cap].title}</span>
+                <span className={cn('font-mono', usingBuiltin ? 'text-emerald-300/80' : 'text-amber-200')}>
+                  {usingBuiltin ? '内置智谱' : `${r?.accountName} · ${r?.model || '默认模型'}`}
+                </span>
+              </div>
+            )
+          })}
+        </div>
+        <p className="mt-3 text-[10px] leading-relaxed text-zinc-600">
+          前往「能力路由」标签页可把任意能力切换到自定义供应商；未配置或执行失败时自动回落内置服务。
+        </p>
+      </div>
+    </div>
+  )
+}
+
+/* ------------------------------ 账户编辑面板 ------------------------------ */
+
+interface AccountPaneProps {
+  draft: Draft
+  isNew: boolean
+  testing: boolean
+  saving: boolean
+  confirmDelete: boolean
+  filteredModels: string[]
+  modelSearch: string
+  newModel: string
+  onPatch: (patch: Partial<Draft>) => void
+  onTest: () => void
+  onSave: () => void
+  onDelete: () => void
+  onModelSearch: (v: string) => void
+  onNewModel: (v: string) => void
+  onAddModel: () => void
+  onRemoveModel: (m: string) => void
+}
+
+function AccountPane(p: AccountPaneProps) {
+  const { draft } = p
+  const preset = getPreset(draft.presetId)
+  const isCustom = draft.presetId === CUSTOM_PRESET_ID
+  const needKey = preset ? preset.needKey : true
+  const isLocal = /^http:\/\/(localhost|127\.0\.0\.1)/.test(draft.baseUrl)
+
+  return (
+    <div className="space-y-3 pb-2">
+      {/* 头部：预置信息 */}
+      {preset && (
+        <div className="flex items-center gap-2.5 rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2.5">
+          <span
+            className={cn(
+              'flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br text-[12px] font-bold text-zinc-950',
+              preset.accent,
+            )}
+          >
+            {preset.badge}
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="flex items-center gap-1.5 text-[12px] font-semibold text-zinc-100">
+              {preset.name}
+              <span className="text-[9px] font-normal text-zinc-500">{preset.nameEn}</span>
+            </p>
+            <p className="truncate text-[10px] text-zinc-500">{preset.desc}</p>
+          </div>
+          <div className="flex shrink-0 items-center gap-1">
+            {preset.abilities.map((ab) => (
+              <span key={ab} className="rounded border border-zinc-700/60 px-1.5 py-0.5 text-[9px] text-zinc-400">
+                {ABILITY_LABEL[ab]}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 基础字段 */}
+      <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+        <Field label="名称">
+          <input
+            value={draft.name}
+            onChange={(e) => p.onPatch({ name: e.target.value })}
+            placeholder="供应商名称"
+            disabled={p.saving}
+            className="h-7 w-full rounded-md border border-zinc-800 bg-zinc-900/60 px-2 text-[11px] text-zinc-200 outline-none transition placeholder:text-zinc-600 focus:border-amber-500/50 focus:bg-zinc-900"
+          />
+        </Field>
+        <Field label="协议">
+          <Select
+            value={draft.protocol}
+            onValueChange={(v) => p.onPatch({ protocol: v as ProviderProtocol })}
+            disabled={!isCustom || p.saving}
+          >
+            <SelectTrigger
+              size="sm"
+              className={cn(
+                'h-7 w-full border-zinc-800 bg-zinc-900 text-[11px] text-zinc-200 focus-visible:ring-zinc-700 data-[size=sm]:h-7',
+                !isCustom && 'opacity-70',
+              )}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent className="border-zinc-700 bg-zinc-900 text-zinc-200">
+              {(Object.keys(PROTOCOL_LABEL) as ProviderProtocol[]).map((pr) => (
+                <SelectItem key={pr} value={pr} className="text-[11px]">
+                  {PROTOCOL_LABEL[pr]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+        <Field label="Base URL" className="sm:col-span-2">
+          <input
+            value={draft.baseUrl}
+            onChange={(e) => p.onPatch({ baseUrl: e.target.value })}
+            placeholder="https://api.example.com/v1"
+            disabled={p.saving}
+            spellCheck={false}
+            className="h-7 w-full rounded-md border border-zinc-800 bg-zinc-900/60 px-2 font-mono text-[11px] text-zinc-200 outline-none transition placeholder:text-zinc-600 focus:border-amber-500/50 focus:bg-zinc-900"
+          />
+        </Field>
+        <Field label="API Key" className="sm:col-span-2">
+          <div className="flex w-full items-center gap-1.5">
+            <input
+              type="password"
+              value={draft.apiKey}
+              onChange={(e) => p.onPatch({ apiKey: e.target.value })}
+              placeholder={
+                isLocal || !needKey
+                  ? '本地服务无需密钥'
+                  : draft.hasKeyRetained
+                    ? `已保存 ${draft.keyMask}（留空则不修改）`
+                    : '粘贴 API Key 后点击「测试连接」'
+              }
+              disabled={p.saving}
+              autoComplete="new-password"
+              spellCheck={false}
+              className="h-7 min-w-0 flex-1 rounded-md border border-zinc-800 bg-zinc-900/60 px-2 font-mono text-[11px] text-zinc-200 outline-none transition placeholder:font-sans placeholder:text-zinc-600 focus:border-amber-500/50 focus:bg-zinc-900"
+            />
+            {preset?.keyUrl && (
+              <a
+                href={preset.keyUrl}
+                target="_blank"
+                rel="noreferrer"
+                title={`前往 ${preset.name} 控制台获取密钥`}
+                className="flex h-7 shrink-0 items-center gap-1 rounded-md border border-zinc-700 px-2 text-[10px] text-zinc-400 transition hover:border-amber-500/50 hover:bg-amber-500/10 hover:text-amber-200"
+              >
+                获取密钥
+                <ExternalLink className="h-3 w-3" />
+              </a>
+            )}
+          </div>
+        </Field>
+      </div>
+
+      {/* 测试 + 保存 */}
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={p.onTest}
+          disabled={p.testing || p.saving || (!isLocal && needKey && draft.apiKey.trim() === '' && !draft.hasKeyRetained)}
+          className="h-8 gap-1.5 border-zinc-700 text-[11px] text-zinc-200 hover:border-amber-500/50 hover:bg-amber-500/10 hover:text-amber-200"
+        >
+          {p.testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PlugZap className="h-3.5 w-3.5" />}
+          测试连接并获取模型
+        </Button>
+        <Button
+          size="sm"
+          onClick={p.onSave}
+          disabled={p.testing || p.saving}
+          className="h-8 gap-1.5 bg-gradient-to-r from-amber-500 to-orange-500 px-4 text-[11px] font-semibold text-zinc-950 transition hover:from-amber-400 hover:to-orange-400"
+        >
+          {p.saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <KeyRound className="h-3.5 w-3.5" />}
+          {p.isNew ? '测试通过后保存' : '保存'}
+        </Button>
+        <label className="ml-auto flex items-center gap-1.5 text-[10px] text-zinc-500">
           启用
           <Switch
-            checked={isVideo ? false : draft.enabled}
-            disabled={isVideo || disabled}
-            onCheckedChange={(v) => onChange({ enabled: v })}
+            checked={draft.enabled}
+            disabled={p.saving}
+            onCheckedChange={(v) => p.onPatch({ enabled: v })}
             className="data-[state=checked]:bg-amber-500 data-[state=unchecked]:bg-zinc-700"
           />
         </label>
       </div>
 
-      {isVideo ? (
-        <p className="mt-3 rounded-md border border-zinc-800/70 bg-zinc-950/60 px-2.5 py-2 text-[10px] leading-relaxed text-zinc-500">
-          视频供应商接入中，当前使用内置智谱（CogVideoX）。视频生成协议各平台差异较大，暂不开放自定义接入。
-        </p>
-      ) : (
-        <>
-          {/* 供应商选择 */}
-          <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2">
-            <div className="flex min-w-[190px] items-center gap-2">
-              <span className="w-[52px] shrink-0 text-[10px] text-zinc-500">供应商</span>
-              <Select
-                value={draft.providerKind}
-                onValueChange={(v) => onChange({ providerKind: v as Draft['providerKind'] })}
-                disabled={disabled}
-              >
-                <SelectTrigger
-                  size="sm"
-                  className="h-7 flex-1 border-zinc-800 bg-zinc-900 text-[11px] text-zinc-200 focus-visible:ring-zinc-700 data-[size=sm]:h-7"
+      {/* 测试结果条 */}
+      {(draft.status !== 'unverified' || draft.statusMessage) && (
+        <div
+          className={cn(
+            'flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[10px]',
+            draft.status === 'ok' && 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200',
+            draft.status === 'error' && 'border-rose-500/30 bg-rose-500/10 text-rose-200',
+            draft.status === 'unverified' && 'border-zinc-800 bg-zinc-900 text-zinc-400',
+          )}
+        >
+          {draft.status === 'ok' ? (
+            <CheckCircle2 className="h-3 w-3 shrink-0" />
+          ) : draft.status === 'error' ? (
+            <XCircle className="h-3 w-3 shrink-0" />
+          ) : null}
+          <span className="min-w-0 flex-1 break-all">{draft.statusMessage || '未验证'}</span>
+          {draft.latencyMs !== null && draft.status === 'ok' && (
+            <span className="shrink-0 font-mono opacity-70">{draft.latencyMs}ms</span>
+          )}
+        </div>
+      )}
+
+      {/* 模型列表 */}
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900/40">
+        <div className="flex items-center gap-2 border-b border-zinc-800 px-3 py-2">
+          <Search className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
+          <input
+            value={p.modelSearch}
+            onChange={(e) => p.onModelSearch(e.target.value)}
+            placeholder={draft.models.length > 0 ? `在 ${draft.models.length} 个模型中搜索…` : '测试连接后自动获取模型列表'}
+            disabled={draft.models.length === 0}
+            className="h-6 min-w-0 flex-1 bg-transparent text-[11px] text-zinc-200 outline-none placeholder:text-zinc-600 disabled:cursor-not-allowed"
+          />
+          <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-[9px] text-zinc-400">
+            {draft.models.length}
+          </span>
+        </div>
+        {draft.models.length > 0 && (
+          <ScrollArea className="max-h-40">
+            <div className="p-1.5">
+              {p.filteredModels.map((m) => (
+                <div
+                  key={m}
+                  className="group flex items-center gap-2 rounded-md px-2 py-1 transition hover:bg-zinc-800/60"
                 >
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent className="border-zinc-700 bg-zinc-900 text-zinc-200">
-                  <SelectItem value="builtin" className="text-[11px]">
-                    内置智谱
-                  </SelectItem>
-                  <SelectItem value="openai_compatible" className="text-[11px]">
-                    OpenAI 兼容
-                  </SelectItem>
-                </SelectContent>
-              </Select>
+                  <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-zinc-300" title={m}>
+                    {m}
+                  </span>
+                  <button
+                    onClick={() => p.onRemoveModel(m)}
+                    title="移除该模型"
+                    className="shrink-0 rounded p-0.5 text-zinc-600 opacity-0 transition hover:bg-rose-500/15 hover:text-rose-300 group-hover:opacity-100"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                </div>
+              ))}
             </div>
-            <button
-              onClick={onTest}
-              disabled={disabled || !isCustom || test?.status === 'testing'}
-              title={isCustom ? '向该服务发送一次极短请求，验证连通与鉴权' : '切换到 OpenAI 兼容后可测试'}
-              className="flex h-7 items-center gap-1 rounded-md border border-zinc-700 px-2.5 text-[10px] text-zinc-300 transition hover:border-amber-500/50 hover:bg-amber-500/10 hover:text-amber-200 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-zinc-700 disabled:hover:bg-transparent disabled:hover:text-zinc-300"
-            >
-              {test?.status === 'testing' ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              ) : (
-                <PlugZap className="h-3 w-3" />
-              )}
-              测试连接
-            </button>
+          </ScrollArea>
+        )}
+        <div className="flex items-center gap-1.5 border-t border-zinc-800 px-2.5 py-2">
+          <input
+            value={p.newModel}
+            onChange={(e) => p.onNewModel(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') p.onAddModel()
+            }}
+            placeholder="手动添加模型名（部分服务不开放列表接口）"
+            disabled={p.saving}
+            spellCheck={false}
+            className="h-6 min-w-0 flex-1 rounded border border-zinc-800 bg-zinc-950/60 px-2 font-mono text-[10.5px] text-zinc-200 outline-none transition placeholder:font-sans placeholder:text-zinc-600 focus:border-amber-500/50"
+          />
+          <button
+            onClick={p.onAddModel}
+            disabled={p.saving || !p.newModel.trim()}
+            className="flex h-6 shrink-0 items-center gap-1 rounded border border-zinc-700 px-2 text-[10px] text-zinc-300 transition hover:border-amber-500/50 hover:bg-amber-500/10 hover:text-amber-200 disabled:opacity-40"
+          >
+            <Plus className="h-3 w-3" />
+            添加
+          </button>
+        </div>
+      </div>
+
+      {/* 危险区 */}
+      {!p.isNew && draft.id && (
+        <div className="flex items-center justify-between rounded-lg border border-rose-500/20 bg-rose-500/5 px-3 py-2">
+          <div>
+            <p className="text-[11px] text-rose-200">删除该供应商</p>
+            <p className="text-[9px] text-zinc-500">引用它的能力路由将自动重置为内置服务</p>
           </div>
-
-          {isCustom && (
-            <>
-              <p className="mt-2 text-[10px] text-zinc-600">{meta.customDesc}</p>
-              <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                <Field label="Base URL" className="sm:col-span-2">
-                  <input
-                    value={draft.baseUrl}
-                    onChange={(e) => onChange({ baseUrl: e.target.value })}
-                    placeholder="https://api.example.com/v1"
-                    disabled={disabled}
-                    spellCheck={false}
-                    className="h-7 w-full rounded-md border border-zinc-800 bg-zinc-900/60 px-2 font-mono text-[11px] text-zinc-200 outline-none transition placeholder:text-zinc-600 focus:border-amber-500/50 focus:bg-zinc-900"
-                  />
-                </Field>
-                <Field label="API Key">
-                  <input
-                    type="password"
-                    value={draft.apiKey}
-                    onChange={(e) => onChange({ apiKey: e.target.value })}
-                    placeholder={
-                      view.hasKey
-                        ? `已保存 ${view.apiKeyMask}（留空则不修改）`
-                        : '输入 API Key'
-                    }
-                    disabled={disabled}
-                    autoComplete="new-password"
-                    className="h-7 w-full rounded-md border border-zinc-800 bg-zinc-900/60 px-2 font-mono text-[11px] text-zinc-200 outline-none transition placeholder:font-sans placeholder:text-zinc-600 focus:border-amber-500/50 focus:bg-zinc-900"
-                  />
-                </Field>
-                <Field label={cap === 'tts' ? '模型名（如 tts-1）' : '模型名'}>
-                  <input
-                    value={draft.model}
-                    onChange={(e) => onChange({ model: e.target.value })}
-                    placeholder={
-                      cap === 'llm' ? '如 gpt-4o-mini' : cap === 'image' ? '如 dall-e-3' : '如 tts-1'
-                    }
-                    disabled={disabled}
-                    spellCheck={false}
-                    className="h-7 w-full rounded-md border border-zinc-800 bg-zinc-900/60 px-2 font-mono text-[11px] text-zinc-200 outline-none transition placeholder:font-sans placeholder:text-zinc-600 focus:border-amber-500/50 focus:bg-zinc-900"
-                  />
-                </Field>
-                {cap === 'tts' && (
-                  <Field label="音色 Voice" className="sm:col-span-2">
-                    <input
-                      value={draft.voice}
-                      onChange={(e) => onChange({ voice: e.target.value })}
-                      placeholder="如 alloy / echo（留空则使用节点参数或供应商默认）"
-                      disabled={disabled}
-                      spellCheck={false}
-                      className="h-7 w-full rounded-md border border-zinc-800 bg-zinc-900/60 px-2 text-[11px] text-zinc-200 outline-none transition placeholder:text-zinc-600 focus:border-amber-500/50 focus:bg-zinc-900"
-                    />
-                  </Field>
-                )}
-              </div>
-            </>
-          )}
-
-          {!isCustom && (
-            <p className="mt-2.5 text-[10px] leading-relaxed text-zinc-600">
-              使用内置智谱能力，由平台托管，无需配置。
-            </p>
-          )}
-
-          {/* 测试结果（内联） */}
-          {test && (
-            <div
-              className={cn(
-                'mt-2 flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[10px]',
-                test.status === 'ok' && 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200',
-                test.status === 'fail' && 'border-rose-500/30 bg-rose-500/10 text-rose-200',
-                test.status === 'testing' && 'border-zinc-800 bg-zinc-900 text-zinc-400',
-              )}
-            >
-              {test.status === 'ok' && <CheckCircle2 className="h-3 w-3 shrink-0" />}
-              {test.status === 'fail' && <XCircle className="h-3 w-3 shrink-0" />}
-              {test.status === 'testing' && <Loader2 className="h-3 w-3 shrink-0 animate-spin" />}
-              <span className="min-w-0 flex-1 break-all">{test.message}</span>
-              {test.latencyMs !== undefined && test.status !== 'testing' && (
-                <span className="shrink-0 font-mono opacity-70">{test.latencyMs}ms</span>
-              )}
-            </div>
-          )}
-        </>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={p.onDelete}
+            disabled={p.saving}
+            className={cn(
+              'h-7 gap-1.5 border-rose-500/40 text-[10px] text-rose-300 hover:bg-rose-500/15 hover:text-rose-200',
+              p.confirmDelete && 'border-rose-500 bg-rose-500/20',
+            )}
+          >
+            {p.confirmDelete ? <XCircle className="h-3 w-3" /> : <Trash2 className="h-3 w-3" />}
+            {p.confirmDelete ? '再点一次确认删除' : '删除'}
+          </Button>
+        </div>
       )}
     </div>
   )
 }
+
+/* ------------------------------ 能力路由面板 ------------------------------ */
+
+function RoutingPane({
+  routes,
+  accounts,
+  saving,
+  onPatch,
+  onSave,
+}: {
+  routes: Record<Capability, RouteDraft> | null
+  accounts: AccountView[]
+  saving: boolean
+  onPatch: (cap: Capability, patch: Partial<RouteDraft>) => void
+  onSave: () => void
+}) {
+  if (!routes) {
+    return (
+      <div className="space-y-2 py-2">
+        {[1, 2, 3, 4].map((i) => (
+          <div key={i} className="h-20 animate-pulse rounded-lg bg-zinc-900" />
+        ))}
+      </div>
+    )
+  }
+  const accountById = new Map(accounts.map((a) => [a.id, a]))
+  return (
+    <div className="space-y-2.5">
+      <ScrollArea className="max-h-[54vh] pr-1.5">
+        <div className="space-y-2.5">
+          {CAPS.map((cap) => {
+            const meta = CAP_META[cap]
+            const r = routes[cap]
+            const isVideo = cap === 'video'
+            // 该能力可选的账户：协议支持该能力 且 已启用
+            const eligible = accounts.filter(
+              (a) => a.enabled && protocolAbilities(a.protocol as ProviderProtocol).includes(meta.ability),
+            )
+            const current = r.providerKind === 'account' ? accountById.get(r.accountId) : undefined
+            const currentIneligible = current && !eligible.some((e) => e.id === current.id)
+            const models = current?.models ?? []
+
+            return (
+              <div
+                key={cap}
+                className={cn('rounded-lg border p-3.5', isVideo ? 'border-zinc-800/60 bg-zinc-900/30' : 'border-zinc-800 bg-zinc-900/60')}
+              >
+                <div className="flex items-center gap-2">
+                  <span className={meta.accent}>{meta.icon}</span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[12px] font-medium text-zinc-200">
+                      {meta.title}
+                      {isVideo && <Lock className="ml-1.5 inline h-3 w-3 text-zinc-600" />}
+                    </p>
+                    <p className="text-[10px] text-zinc-600">{meta.desc}</p>
+                  </div>
+                  <label className="flex items-center gap-1.5 text-[10px] text-zinc-500">
+                    启用
+                    <Switch
+                      checked={isVideo ? false : r.enabled}
+                      disabled={isVideo || saving}
+                      onCheckedChange={(v) => onPatch(cap, { enabled: v })}
+                      className="data-[state=checked]:bg-amber-500 data-[state=unchecked]:bg-zinc-700"
+                    />
+                  </label>
+                </div>
+
+                {isVideo ? (
+                  <p className="mt-2.5 rounded-md border border-zinc-800/70 bg-zinc-950/60 px-2.5 py-2 text-[10px] leading-relaxed text-zinc-500">
+                    视频生成协议各平台差异较大，暂使用内置智谱（CogVideoX）；自定义视频供应商接入已在规划中。
+                  </p>
+                ) : (
+                  <div className="mt-2.5 space-y-2">
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                      <div className="flex min-w-[210px] items-center gap-2">
+                        <span className="w-[40px] shrink-0 text-[10px] text-zinc-500">供应商</span>
+                        <Select
+                          value={r.providerKind === 'account' ? r.accountId : 'builtin'}
+                          onValueChange={(v) =>
+                            onPatch(cap, {
+                              providerKind: v === 'builtin' ? 'builtin' : 'account',
+                              accountId: v === 'builtin' ? '' : v,
+                              model: '',
+                            })
+                          }
+                          disabled={saving}
+                        >
+                          <SelectTrigger
+                            size="sm"
+                            className="h-7 flex-1 border-zinc-800 bg-zinc-900 text-[11px] text-zinc-200 focus-visible:ring-zinc-700 data-[size=sm]:h-7"
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent className="border-zinc-700 bg-zinc-900 text-zinc-200">
+                            <SelectItem value="builtin" className="text-[11px]">
+                              内置智谱
+                            </SelectItem>
+                            {eligible.map((a) => (
+                              <SelectItem key={a.id} value={a.id} className="text-[11px]">
+                                {a.name}
+                              </SelectItem>
+                            ))}
+                            {currentIneligible && (
+                              <SelectItem value={current.id} className="text-[11px] text-rose-300">
+                                {current.name}（协议不支持该能力）
+                              </SelectItem>
+                            )}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      {r.providerKind === 'account' && (
+                        <div className="flex min-w-[210px] flex-1 items-center gap-2">
+                          <span className="w-[40px] shrink-0 text-[10px] text-zinc-500">模型</span>
+                          {models.length > 0 ? (
+                            <Select value={r.model} onValueChange={(v) => onPatch(cap, { model: v })} disabled={saving}>
+                              <SelectTrigger
+                                size="sm"
+                                className="h-7 flex-1 border-zinc-800 bg-zinc-900 font-mono text-[10.5px] text-zinc-200 focus-visible:ring-zinc-700 data-[size=sm]:h-7"
+                              >
+                                <SelectValue placeholder="选择模型" />
+                              </SelectTrigger>
+                              <SelectContent className="border-zinc-700 bg-zinc-900 text-zinc-200">
+                                {models.map((m) => (
+                                  <SelectItem key={m} value={m} className="font-mono text-[10.5px]">
+                                    {m}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          ) : (
+                            <input
+                              value={r.model}
+                              onChange={(e) => onPatch(cap, { model: e.target.value })}
+                              placeholder="该账户尚未获取模型列表，手输模型名"
+                              disabled={saving}
+                              spellCheck={false}
+                              className="h-7 min-w-0 flex-1 rounded-md border border-zinc-800 bg-zinc-900/60 px-2 font-mono text-[10.5px] text-zinc-200 outline-none transition placeholder:font-sans placeholder:text-zinc-600 focus:border-amber-500/50"
+                            />
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    {cap === 'tts' && r.providerKind === 'account' && (
+                      <div className="flex items-center gap-2">
+                        <span className="w-[40px] shrink-0 text-[10px] text-zinc-500">音色</span>
+                        <input
+                          value={r.voice}
+                          onChange={(e) => onPatch(cap, { voice: e.target.value })}
+                          placeholder="如 alloy / echo（留空使用节点参数或默认音色）"
+                          disabled={saving}
+                          spellCheck={false}
+                          className="h-7 min-w-0 flex-1 rounded-md border border-zinc-800 bg-zinc-900/60 px-2 text-[11px] text-zinc-200 outline-none transition placeholder:text-zinc-600 focus:border-amber-500/50"
+                        />
+                      </div>
+                    )}
+                    {r.providerKind === 'account' && !r.enabled && (
+                      <p className="text-[10px] text-amber-400/70">已停用：执行时将回落内置智谱。</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      </ScrollArea>
+
+      <div className="flex items-center justify-between gap-2 border-t border-zinc-800 pt-3">
+        <p className="text-[10px] leading-relaxed text-zinc-600">
+          提示词优化失败会自动回落内置模型；图像 / 语音配置后执行即走自定义服务。
+        </p>
+        <Button
+          size="sm"
+          onClick={onSave}
+          disabled={saving}
+          className="h-8 shrink-0 gap-1.5 bg-gradient-to-r from-amber-500 to-orange-500 px-3.5 text-[12px] font-semibold text-zinc-950 transition hover:from-amber-400 hover:to-orange-400"
+        >
+          {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <KeyRound className="h-3.5 w-3.5" />}
+          保存路由
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+/* ------------------------------ 预置选择器 ------------------------------ */
+
+function PresetPicker({
+  open,
+  onOpenChange,
+  addedIds,
+  onPick,
+}: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  addedIds: string[]
+  onPick: (p: ProviderPreset) => void
+}) {
+  const [kw, setKw] = useState('')
+  const list = useMemo(() => {
+    const k = kw.trim().toLowerCase()
+    if (!k) return PROVIDER_PRESETS
+    return PROVIDER_PRESETS.filter(
+      (p) =>
+        p.name.toLowerCase().includes(k) ||
+        p.nameEn.toLowerCase().includes(k) ||
+        p.desc.toLowerCase().includes(k),
+    )
+  }, [kw])
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="border-zinc-800 bg-zinc-950 sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-zinc-100">
+            <MessageSquareText className="h-4 w-4 text-amber-300" />
+            从预置目录添加供应商
+          </DialogTitle>
+          <DialogDescription className="text-zinc-500">
+            已内置 {PROVIDER_PRESETS.length} 家常见服务商的接入参数；也可以添加完全自定义的 OpenAI 兼容服务。
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900/60 px-2.5">
+          <Search className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
+          <input
+            value={kw}
+            onChange={(e) => setKw(e.target.value)}
+            placeholder="搜索供应商（如 DeepSeek / 聚合 / 本地）"
+            className="h-8 w-full bg-transparent text-[12px] text-zinc-200 outline-none placeholder:text-zinc-600"
+          />
+        </div>
+
+        <ScrollArea className="max-h-[46vh] pr-1.5">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            {list.map((p) => {
+              const added = addedIds.includes(p.id)
+              return (
+                <button
+                  key={p.id}
+                  onClick={() => onPick(p)}
+                  disabled={added}
+                  className={cn(
+                    'group flex items-start gap-2.5 rounded-lg border p-3 text-left transition',
+                    added
+                      ? 'cursor-not-allowed border-zinc-800/60 bg-zinc-900/20 opacity-45'
+                      : 'border-zinc-800 bg-zinc-900/50 hover:border-amber-500/40 hover:bg-amber-500/5',
+                  )}
+                >
+                  <span
+                    className={cn(
+                      'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br text-[12px] font-bold text-zinc-950',
+                      p.accent,
+                    )}
+                  >
+                    {p.badge}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="flex items-center gap-1.5">
+                      <span className="truncate text-[12px] font-semibold text-zinc-100">{p.name}</span>
+                      <span className="shrink-0 text-[9px] text-zinc-500">{p.nameEn}</span>
+                    </span>
+                    <span className="mt-0.5 line-clamp-2 block text-[10px] leading-relaxed text-zinc-500">
+                      {p.desc}
+                    </span>
+                    <span className="mt-1.5 flex flex-wrap items-center gap-1">
+                      {p.abilities.map((ab) => (
+                        <span key={ab} className="rounded border border-zinc-700/60 px-1 py-px text-[8.5px] text-zinc-400">
+                          {ABILITY_LABEL[ab]}
+                        </span>
+                      ))}
+                      {added && (
+                        <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1 py-px text-[8.5px] text-emerald-300">
+                          已添加
+                        </span>
+                      )}
+                    </span>
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+
+          <button
+            onClick={() => onPick(CUSTOM_PLACEHOLDER)}
+            className="mt-2 flex w-full items-center gap-2.5 rounded-lg border border-dashed border-zinc-700 p-3 text-left transition hover:border-amber-500/40 hover:bg-amber-500/5"
+          >
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-zinc-600 text-zinc-400">
+              <Plus className="h-4 w-4" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-[12px] font-semibold text-zinc-100">自定义供应商</span>
+              <span className="block text-[10px] text-zinc-500">
+                任意 OpenAI 兼容 / Anthropic / Gemini 服务（中转站、自建网关等）
+              </span>
+            </span>
+          </button>
+        </ScrollArea>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+const CUSTOM_PLACEHOLDER: ProviderPreset = {
+  id: CUSTOM_PRESET_ID,
+  name: '',
+  nameEn: 'Custom Provider',
+  protocol: 'openai',
+  baseUrl: '',
+  keyUrl: undefined,
+  homeUrl: undefined,
+  desc: '',
+  abilities: ['chat'],
+  accent: 'from-zinc-400 to-zinc-600',
+  badge: '+',
+  needKey: true,
+}
+
+/* ------------------------------ 小组件 ------------------------------ */
 
 function Field({
   label,
@@ -529,4 +1337,21 @@ function Field({
       {children}
     </label>
   )
+}
+
+/* ------------------------------ 工具 ------------------------------ */
+
+function fromRoutes(routes: CapabilityRoute[]): Record<Capability, RouteDraft> {
+  const out = {} as Record<Capability, RouteDraft>
+  for (const cap of CAPS) {
+    const r = routes.find((x) => x.capability === cap)
+    out[cap] = {
+      providerKind: r && r.providerKind === 'account' ? 'account' : 'builtin',
+      accountId: r?.accountId ?? '',
+      model: r?.model ?? '',
+      voice: r?.voice ?? '',
+      enabled: r?.enabled ?? true,
+    }
+  }
+  return out
 }

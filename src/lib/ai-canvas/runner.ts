@@ -8,7 +8,8 @@ import { execFile, spawn } from 'child_process'
 import { promisify } from 'util'
 import ZAI from 'z-ai-web-dev-sdk'
 import { db } from '@/lib/db'
-import { getProviderConfig, type ProviderConfig } from '@/lib/ai-canvas/provider-config'
+import { getProviderConfig, type ResolvedProvider } from '@/lib/ai-canvas/provider-config'
+import { callChat } from '@/lib/ai-canvas/provider-protocol'
 
 const execFileAsync = promisify(execFile)
 
@@ -102,7 +103,9 @@ async function withRetry<T>(
   throw lastErr as Error
 }
 
-/* ---------------------- 自定义模型供应商（OpenAI 兼容协议） ---------------------- */
+/* -------------------- 自定义模型供应商（多协议适配） -------------------- */
+/* 文本：openai / anthropic / gemini 三协议（provider-protocol.ts）
+ * 图像 / 语音：OpenAI 兼容协议（/images/generations、/audio/speech） */
 
 const CUSTOM_TIMEOUT_MS = 60_000
 
@@ -169,63 +172,42 @@ function audioExtFromContentType(ct: string | null): string {
   return 'wav'
 }
 
-/** 自定义 LLM：POST {baseUrl}/chat/completions，解析 choices[0].message.content */
+/** 自定义 LLM：按账户协议分发（openai / anthropic / gemini），返回纯文本 */
 async function callCustomLLM(
-  cfg: ProviderConfig,
+  cfg: ResolvedProvider,
   text: string,
   style: string,
   target: string,
   onProgress: ProgressFn,
 ): Promise<string> {
-  if (!cfg.model) {
-    throw new Error('自定义模型未配置模型名，请在「模型服务配置」中填写')
-  }
-  const res = await withRetry(
+  return withRetry(
     () =>
-      customFetch(
-        `${cfg.baseUrl}/chat/completions`,
+      callChat(
+        { protocol: cfg.protocol, baseUrl: cfg.baseUrl, apiKey: cfg.apiKey },
         {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${cfg.apiKey}`,
-          },
-          body: JSON.stringify({
-            model: cfg.model,
-            messages: [
-              {
-                role: 'system',
-                content:
-                  '你是专业的 AI 视频提示词工程师，只输出扩写后的提示词本身，不要任何多余内容。',
-              },
-              { role: 'user', content: buildEnhancePrompt(text, style, target) },
-            ],
-          }),
+          model: cfg.model,
+          system: '你是专业的 AI 视频提示词工程师，只输出扩写后的提示词本身，不要任何多余内容。',
+          user: buildEnhancePrompt(text, style, target),
         },
-        '自定义模型',
       ),
     { label: '自定义模型', onRetry: onProgress },
   )
-  await assertCustomOk(res, '自定义模型')
-  const j = (await res.json().catch(() => null)) as {
-    choices?: { message?: { content?: string } }[]
-  } | null
-  const content = j?.choices?.[0]?.message?.content
-  if (!content || !String(content).trim()) {
-    throw new Error('自定义模型未返回有效内容（响应缺少 choices[0].message.content）')
-  }
-  return String(content)
 }
 
-/** 自定义文生图：POST {baseUrl}/images/generations，兼容 b64_json 与 url 两种响应 */
+/** 自定义文生图：POST {baseUrl}/images/generations，兼容 b64_json 与 url 两种响应（仅 OpenAI 兼容协议） */
 async function callCustomImageGen(
-  cfg: ProviderConfig,
+  cfg: ResolvedProvider,
   prompt: string,
   size: string,
   onProgress: ProgressFn,
 ): Promise<string> {
+  if (cfg.protocol !== 'openai') {
+    throw new Error(
+      `该供应商（${cfg.protocol} 协议）暂不支持图像生成，请在能力路由中改用 OpenAI 兼容供应商`,
+    )
+  }
   if (!cfg.model) {
-    throw new Error('自定义图像供应商未配置模型名，请在「模型服务配置」中填写')
+    throw new Error('自定义图像供应商未配置模型名，请在「模型服务配置」中选择')
   }
   const res = await withRetry(
     () =>
@@ -256,16 +238,21 @@ async function callCustomImageGen(
   throw new Error('自定义图像生成响应格式不兼容（缺少 data[0].b64_json / url）')
 }
 
-/** 自定义 TTS：POST {baseUrl}/audio/speech，响应为二进制音频，按 content-type 判断扩展名落盘 */
+/** 自定义 TTS：POST {baseUrl}/audio/speech，响应为二进制音频，按 content-type 判断扩展名落盘（仅 OpenAI 兼容协议） */
 async function callCustomTTS(
-  cfg: ProviderConfig,
+  cfg: ResolvedProvider,
   text: string,
   voiceParam?: string,
   speed?: number,
   onProgress?: ProgressFn,
 ): Promise<{ url: string; voice: string; ext: string }> {
+  if (cfg.protocol !== 'openai') {
+    throw new Error(
+      `该供应商（${cfg.protocol} 协议）暂不支持语音合成，请在能力路由中改用 OpenAI 兼容供应商`,
+    )
+  }
   if (!cfg.model) {
-    throw new Error('自定义语音供应商未配置模型名，请在「模型服务配置」中填写')
+    throw new Error('自定义语音供应商未配置模型名，请在「模型服务配置」中选择')
   }
   // 音色优先级：模型服务配置的 voice > 节点参数 voice > 供应商默认 alloy
   const voice = cfg.voice || voiceParam || 'alloy'
@@ -597,7 +584,7 @@ async function runEnhancer(
   if (custom) {
     try {
       onProgress(
-        custom.model ? `使用自定义模型 ${custom.model}…` : '使用自定义模型…',
+        `使用 ${custom.accountName ?? '自定义'} · ${custom.model || '默认模型'}…`,
         20,
       )
       out = await callCustomLLM(custom, text, style, target, onProgress)
@@ -653,7 +640,7 @@ async function runImageGen(
   // 自定义图像供应商（OpenAI 兼容 /images/generations）：配置且启用时使用，错误直接抛给节点显示
   const custom = await getProviderConfig('image')
   if (custom) {
-    onProgress(custom.model ? `使用自定义图像模型 ${custom.model}…` : '使用自定义图像模型…', 25)
+    onProgress(`使用 ${custom.accountName ?? '自定义'} · ${custom.model || '默认图像模型'}…`, 25)
     const url = await callCustomImageGen(custom, prompt, size, onProgress)
     onProgress('正在保存图像…', 85)
     return {
@@ -1045,7 +1032,7 @@ async function runTTS(
   // 自定义语音供应商（OpenAI 兼容 /audio/speech）：配置且启用时使用，错误直接抛给节点显示
   const custom = await getProviderConfig('tts')
   if (custom) {
-    onProgress(custom.model ? `使用自定义语音模型 ${custom.model}…` : '使用自定义语音模型…', 40)
+    onProgress(`使用 ${custom.accountName ?? '自定义'} · ${custom.model || '默认语音模型'}…`, 40)
     const r = await callCustomTTS(custom, text, voice, speed, onProgress)
     onProgress('正在封装音频…', 80)
     return {

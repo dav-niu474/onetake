@@ -45,12 +45,34 @@ model Execution {
   workflow   Workflow? @relation(fields: [workflowId], references: [id], onDelete: SetNull)
 }
 
-// 模型供应商配置（按能力维度路由：llm | image | tts | video）
-// providerKind: builtin = 内置 z-ai-web-dev-sdk；openai_compatible = OpenAI 兼容协议自定义供应商
+// 模型供应商账户（预置目录中的服务或自定义接入的实例）
+// protocol: openai（OpenAI 兼容，覆盖绝大多数厂商）| anthropic | gemini
+// models: JSON 字符串数组，来源 = 「测试连接」时拉取的模型列表 + 手动添加
+// status: unverified 未验证 | ok 测试通过 | error 上次测试失败
+model ProviderAccount {
+  id            String   @id @default(cuid())
+  presetId      String   @default("custom") // 预置 id（openai/deepseek/...），custom = 自定义
+  name          String
+  protocol      String   @default("openai")
+  baseUrl       String
+  apiKey        String?
+  models        String   @default("[]")
+  enabled       Boolean  @default(true)
+  status        String   @default("unverified")
+  statusMessage String?
+  latencyMs     Int?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+// 能力路由（按能力维度指向某个供应商账户或内置服务）：llm | image | tts | video
+// providerKind: builtin = 内置 z-ai-web-dev-sdk；account = 指向 accountId 供应商账户
+//               openai_compatible = 旧版直填配置（首次读取时自动迁移为 account）
 model ProviderSetting {
   id           String   @id @default(cuid())
   capability   String   @unique // llm | image | tts | video
-  providerKind String   @default("builtin") // builtin | openai_compatible
+  providerKind String   @default("builtin") // builtin | account | openai_compatible(legacy)
+  accountId    String? // providerKind=account 时指向 ProviderAccount.id
   baseUrl      String?
   apiKey       String?
   model        String?

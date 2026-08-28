@@ -1,7 +1,7 @@
 import { PrismaClient } from '@prisma/client'
 
-// SCHEMA_VERSION: ProviderSetting added — model provider config per capability (2026-02-14) — bump to bust global client cache after prisma db:push
-const SCHEMA_VERSION = 'v4'
+// SCHEMA_VERSION: ProviderAccount added, ProviderSetting gained accountId — provider presets system (2026-02-15) — bump to bust global client cache after prisma db:push
+const SCHEMA_VERSION = 'v5'
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined
