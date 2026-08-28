@@ -854,3 +854,46 @@ Task: 按用户确认执行仓库重命名
 
 ### 验证结果
 - https://github.com/dav-niu474/onetake 可访问，默认分支 main，描述/标签完好
+
+---
+
+## Task ID: 15 — 三大迭代：多供应商模型配置 / 多场景模板 / 产品链接
+Agent: main (Z.ai Code) + 2 个 full-stack-developer 子代理（15-a / 15-b，超时后由 main 接管验收）
+Task: 模型供应商配置系统 + 场景模板扩展 + 代码仓产品链接
+
+### 项目当前状态描述/判断
+- 子代理超时退出但已完成绝大部分代码（schema/settings-dialog/providers API/runner 集成/12 模板/分类/搜索），main 完成端到端验收、README、推送
+
+### 已完成内容
+
+**1. 模型供应商配置系统（Task 15-a）**
+- Prisma 新表 ProviderSetting（capability unique: llm/image/tts/video，providerKind: builtin|openai_compatible，baseUrl/apiKey/model/voice/enabled）
+- src/lib/prisma-fresh.cjs：dev 热更新 Prisma Client 缓存重建辅助（schema 变更免重启 dev server）
+- API：GET /api/settings/providers（**apiKey 永远脱敏 sk-***abcd** + hasKey）、PUT（upsert，空串保留/「-」清除）、POST test（真实连通性测试 + 延迟）
+- runner.ts 集成：LLM→chat/completions、图像→images/generations（兼容 b64_json/url）、TTS→audio/speech（二进制音频落盘）；视频留扩展点；全部超时保护；节点阶段显示「使用自定义模型 xxx…」；未配置/失败回落内置智谱
+- UI：settings-dialog.tsx（4 能力卡片/供应商切换/测试连接/保存）+ topbar ⚙ 入口 + store settingsOpen
+
+**2. 多场景模板（Task 15-b）**
+- 12 个模板 × 6 分类：基础入门 5 / 短剧创作 2（+小说转剧本·12 节点）/ 音乐 MV 1 / 营销宣传 1（文旅宣传片·9 节点）/ 知识创作 1（知识科普·10 节点）/ 营销带货 2（+好物开箱·7 节点）
+- templates-dialog 分类 chips（带计数，amber 选中态）；library-dialog 名称搜索（空态区分无作品/无匹配）
+
+**3. 产品链接（Task 15-c）**
+- README 新增「🌐 在线体验」节（本地起跑引导 + 云托管版地址预留位）
+- GitHub homepage 暂指 README；**待用户提供公网部署/预览 URL 后填入 README 与 About homepage**（沙箱内无法编程获取预览地址）
+
+### 验证结果（main 逐项实测）
+- lint 0 错误；app 200；ProviderSetting 落库成功
+- API 实测：GET 脱敏回读 ✓、PUT upsert（sk-test→sk-***abcd）✓、test 连接假地址返回明确中文错误（21ms）✓、恢复 builtin ✓
+- agent-browser：设置对话框渲染/开关 ✓；模板分类 chips（全部 12/基础入门 5/...）✓；加载「小说转剧本」→ 画布 12 节点 13 连线、分镜提示词预填 ✓；作品库搜索「全流程」过滤 ✓
+- 恢复用户工作区（故事分镜·三幕成片重新打开，已保存态）✓
+- 推送：6496a27..ede0b25 main -> main
+
+### 未解决问题 / 风险
+- 视频生成供应商仅内置（扩展点已预留）；图生图暂不支持自定义供应商（协议不通用，注释说明）
+- agent-browser fill 清空输入框未触发 React onChange 的现象（真实键盘事件正常，自动化测试注意）
+- 云托管产品链接待用户提供 URL 后写入（README 预留位 + About homepage）
+
+### 下一轮建议（优先级从高到低）
+1. 用户提供产品 URL 后填入 README/About；或部署 Vercel（需 DB 迁移为托管 SQLite/Postgres）
+2. 视频供应商扩展：支持自定义视频生成 API（提交+轮询两段式配置化）
+3. tv3 补跑 → 三幕成片闭环（配额释放后）
