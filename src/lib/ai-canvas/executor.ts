@@ -327,6 +327,27 @@ function downstreamOf(startId: string, edges: { source: string; target: string }
   return seen
 }
 
+/** 某组节点的全部直接+间接上游（用于分组运行时自动补齐依赖） */
+function upstreamClosureOf(startIds: string[], edges: { source: string; target: string }[]): Set<string> {
+  const rev = new Map<string, string[]>()
+  edges.forEach((e) => {
+    if (!rev.has(e.target)) rev.set(e.target, [])
+    rev.get(e.target)!.push(e.source)
+  })
+  const seen = new Set<string>()
+  const stack = [...startIds]
+  while (stack.length > 0) {
+    const cur = stack.pop()!
+    for (const s of rev.get(cur) ?? []) {
+      if (!seen.has(s)) {
+        seen.add(s)
+        stack.push(s)
+      }
+    }
+  }
+  return seen
+}
+
 /** 并发池：按上限并发执行任务，全部结束后统一返回结果 */
 async function runPool<T>(tasks: (() => Promise<T>)[], limit: number): Promise<PromiseSettledResult<T>[]> {
   const results: PromiseSettledResult<T>[] = new Array(tasks.length)
@@ -397,8 +418,40 @@ class Semaphore {
   }
 }
 
-/** 运行整个工作流（拓扑分层 + 层内并行执行） */
+/**
+ * 运行整个工作流（拓扑分层 + 层内并行执行）
+ */
 export async function runWorkflow() {
+  await runScope(null)
+}
+
+/**
+ * 运行分组：分组内全部节点 + 缺少输出的上游依赖。
+ * 上游已有输出的节点直接复用（不重跑），范围外节点状态不受影响。
+ */
+export async function runGroup(groupId: string) {
+  const { groups, nodes, edges } = useCanvasStore.getState()
+  const g = groups.find((x) => x.id === groupId)
+  if (!g) return
+  const coreIds = g.nodeIds.filter((id) => nodes.some((n) => n.id === id))
+  if (coreIds.length === 0) {
+    useCanvasStore.getState().showToast('info', '分组内没有节点')
+    return
+  }
+  // 折叠状态先展开（便于观察执行进度）
+  if (g.collapsed) {
+    useCanvasStore.getState().setGroupCollapsed(groupId, false, { silent: true })
+  }
+  await runScope(coreIds, g.name)
+}
+
+/**
+ * 作用域运行引擎：
+ * - coreIds = null：全图运行（重置全部节点状态，行为与旧版 runWorkflow 一致）
+ * - coreIds = [...]：仅运行这些节点（含缺少输出的上游依赖补齐），
+ *   上游已就绪则复用输出，失败跳过也仅影响作用域内的下游
+ */
+async function runScope(coreIds: string[] | null, scopeName?: string) {
   const store = useCanvasStore.getState()
   const { nodes, edges, setRunning, setNodeRunState, showToast } = store
   if (nodes.length === 0) {
@@ -407,15 +460,41 @@ export async function runWorkflow() {
   }
   if (store.running) return
 
-  const levels = topoLevels(nodes, edges)
+  /* 计算作用域：core + 缺少输出的上游依赖 */
+  const coreSet = coreIds ? new Set(coreIds) : null
+  const scopedUpstream = new Set<string>()
+  if (coreSet) {
+    const upstream = upstreamClosureOf([...coreSet], edges)
+    upstream.forEach((id) => {
+      const n = nodes.find((x) => x.id === id)
+      if (!n) return
+      // 上游依赖：非可执行节点（prompt/asset 等数据即时派生）无需运行；
+      // 可执行节点仅在没有输出时才补跑
+      const hasOutputs = Object.keys(n.data.outputs ?? {}).length > 0
+      if (NODE_SPECS[n.type]?.executable && !hasOutputs) {
+        scopedUpstream.add(id)
+      }
+    })
+  }
+  const scopeIds = coreSet
+    ? new Set([...coreSet, ...scopedUpstream])
+    : new Set(nodes.map((n) => n.id))
+
+  const scopeNodes = nodes.filter((n) => scopeIds.has(n.id))
+  if (scopeNodes.length === 0) {
+    showToast('info', '作用域内没有可运行的节点')
+    return
+  }
+
+  const levels = topoLevels(scopeNodes, edges)
   if (!levels) {
     showToast('error', '图中存在循环连接，请检查')
     return
   }
 
   setRunning(true)
-  // 重置全部状态
-  nodes.forEach((n) =>
+  // 重置作用域内节点状态（全图模式=全部；分组模式=仅作用域）
+  scopeNodes.forEach((n) =>
     setNodeRunState(n.id, 'idle', { stage: undefined, progress: 0, error: undefined }),
   )
 
@@ -476,7 +555,9 @@ export async function runWorkflow() {
           if (!aborted) {
             layerFailed = true
             failedAt.add(id)
-            downstreamOf(id, edges).forEach((d) => skipSet.add(d))
+            downstreamOf(id, edges).forEach((d) => {
+              if (scopeIds.has(d)) skipSet.add(d)
+            })
           }
         }
       })
@@ -512,6 +593,9 @@ export async function runWorkflow() {
     showToast('info', '已停止运行')
   } else if (failedAt.size > 0) {
     showToast('error', '运行中断：存在失败节点，请检查错误信息')
+  } else if (coreSet) {
+    const done = coreSet.size - failedAt.size
+    showToast('success', `${scopeName ? `「${scopeName}」` : '分组'}运行完成（${done}/${coreSet.size} 个节点就绪）🎉`)
   } else {
     showToast('success', '工作流运行完成 🎉')
   }

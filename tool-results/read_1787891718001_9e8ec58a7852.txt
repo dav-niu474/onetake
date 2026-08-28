@@ -1,0 +1,757 @@
+     1→'use client'
+     2→
+     3→/**
+     4→ * AI 视频创作画布 —— 主编辑器
+     5→ */
+     6→import { useCallback, useEffect, useRef, useState } from 'react'
+     7→import {
+     8→  Background,
+     9→  BackgroundVariant,
+    10→  Controls,
+    11→  MiniMap,
+    12→  ReactFlow,
+    13→  ReactFlowProvider,
+    14→  useReactFlow,
+    15→  useStore,
+    16→  type NodeTypes,
+    17→  type EdgeTypes,
+    18→} from '@xyflow/react'
+    19→import '@xyflow/react/dist/style.css'
+    20→import {
+    21→  Sparkles,
+    22→  MousePointer2,
+    23→  Play,
+    24→  Copy,
+    25→  Trash2,
+    26→  Wand2,
+    27→  Maximize,
+    28→  Layers,
+    29→  Grid3x3,
+    30→  Boxes,
+    31→  Pencil,
+    32→  Ungroup as UngroupIcon,
+    33→} from 'lucide-react'
+    34→import { cn } from '@/lib/utils'
+    35→import {
+    36→  isConnectionValid,
+    37→  NODE_SPECS,
+    38→  NODE_TYPE_LIST,
+    39→  GROUP_COLORS,
+    40→  getGroupColor,
+    41→  type CanvasNodeData,
+    42→} from '@/lib/ai-canvas/types'
+    43→import { useCanvasStore } from '@/lib/ai-canvas/store'
+    44→import { runNode, runWorkflow } from '@/lib/ai-canvas/executor'
+    45→import { saveWorkflow, openWorkflow } from '@/lib/ai-canvas/persistence'
+    46→import { getAccent } from './nodes/accents'
+    47→import { GraphNode } from './nodes/graph-node'
+    48→import { CanvasEdge } from './canvas-edge'
+    49→import { TopBar } from './topbar'
+    50→import { Palette } from './palette'
+    51→import { Inspector } from './inspector'
+    52→import { LibraryDialog } from './library-dialog'
+    53→import { TemplatesDialog } from './templates-dialog'
+    54→import { AssetsDialog } from './assets-dialog'
+    55→import { HistoryDialog } from './history-dialog'
+    56→import { GroupLayer } from './group-layer'
+    57→
+    58→const nodeTypes: NodeTypes = Object.fromEntries(
+    59→  NODE_TYPE_LIST.map((s) => [s.type, GraphNode]),
+    60→)
+    61→const edgeTypes: EdgeTypes = { canvas: CanvasEdge }
+    62→
+    63→interface MenuState {
+    64→  screen: { x: number; y: number }
+    65→  flow: { x: number; y: number }
+    66→  nodeId?: string
+    67→  groupId?: string
+    68→}
+    69→
+    70→function StatusBar() {
+    71→  const nodes = useCanvasStore((s) => s.nodes)
+    72→  const edges = useCanvasStore((s) => s.edges)
+    73→  const groups = useCanvasStore((s) => s.groups)
+    74→  const running = useCanvasStore((s) => s.running)
+    75→  const snapToGrid = useCanvasStore((s) => s.snapToGrid)
+    76→  const setSnapToGrid = useCanvasStore((s) => s.setSnapToGrid)
+    77→  const zoom = useStore((s) => s.transform[2])
+    78→  const { fitView } = useReactFlow()
+    79→  const successCount = nodes.filter((n) => n.data.runState === 'success').length
+    80→  const runningCount = nodes.filter((n) => n.data.runState === 'running').length
+    81→  const selectedCount = nodes.filter((n) => n.selected).length
+    82→
+    83→  return (
+    84→    <footer className="mt-auto flex h-7 shrink-0 items-center gap-4 border-t border-zinc-800/80 bg-zinc-950/95 px-4 text-[10px] text-zinc-500 backdrop-blur">
+    85→      <span className="flex items-center gap-1.5">
+    86→        <Layers className="h-3 w-3" />
+    87→        {nodes.length} 节点 · {edges.length} 连线
+    88→        {groups.length > 0 && <span className="text-zinc-400"> · {groups.length} 分组</span>}
+    89→      </span>
+    90→      {selectedCount > 0 && (
+    91→        <span className="hidden text-zinc-400 sm:inline">已选 {selectedCount} 项</span>
+    92→      )}
+    93→      {running && (
+    94→        <span className="flex items-center gap-1.5 text-amber-300">
+    95→          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+    96→          <span className="hidden sm:inline">
+    97→            工作流运行中…{runningCount > 0 ? `（${runningCount} 个节点）` : ''}
+    98→          </span>
+    99→        </span>
+   100→      )}
+   101→      {!running && successCount > 0 && (
+   102→        <span className="hidden text-emerald-400/80 sm:inline">✓ {successCount} 个节点已就绪</span>
+   103→      )}
+   104→      <span className="ml-auto hidden sm:inline">
+   105→        拖入节点 → 连线 → 点击「运行」生成 AI 视频
+   106→      </span>
+   107→      <button
+   108→        onClick={() => setSnapToGrid(!snapToGrid)}
+   109→        className={cn(
+   110→          'flex items-center gap-1 rounded px-1.5 py-0.5 transition hover:bg-zinc-800',
+   111→          snapToGrid ? 'text-amber-300' : 'text-zinc-500 hover:text-zinc-300',
+   112→        )}
+   113→        title="网格吸附（拖动节点时对齐 16px 网格）"
+   114→      >
+   115→        <Grid3x3 className="h-3 w-3" />
+   116→        <span className="hidden lg:inline">网格吸附</span>
+   117→      </button>
+   118→      <button
+   119→        onClick={() => void fitView({ duration: 400, padding: 0.15 })}
+   120→        className="flex items-center gap-1 rounded px-1.5 py-0.5 transition hover:bg-zinc-800 hover:text-zinc-300"
+   121→        title="适应视图"
+   122→      >
+   123→        <Maximize className="h-3 w-3" />
+   124→        <span className="hidden sm:inline">适应视图</span>
+   125→      </button>
+   126→      <button
+   127→        onClick={() => autoLayout()}
+   128→        className="flex items-center gap-1 rounded px-1.5 py-0.5 transition hover:bg-zinc-800 hover:text-zinc-300"
+   129→        title="自动整理布局"
+   130→      >
+   131→        <Wand2 className="h-3 w-3" />
+   132→        <span className="hidden sm:inline">整理布局</span>
+   133→      </button>
+   134→      <span className="tabular-nums">{Math.round(zoom * 100)}%</span>
+   135→    </footer>
+   136→  )
+   137→}
+   138→
+   139→/** 自动分层布局 */
+   140→function autoLayout() {
+   141→  const { nodes, edges } = useCanvasStore.getState()
+   142→  if (nodes.length === 0) return
+   143→  const depth: Record<string, number> = {}
+   144→  nodes.forEach((n) => (depth[n.id] = 0))
+   145→  for (let i = 0; i < nodes.length; i++) {
+   146→    edges.forEach((e) => {
+   147→      depth[e.target] = Math.max(depth[e.target] ?? 0, (depth[e.source] ?? 0) + 1)
+   148→    })
+   149→  }
+   150→  const layers = new Map<number, string[]>()
+   151→  nodes.forEach((n) => {
+   152→    const d = depth[n.id] ?? 0
+   153→    layers.set(d, [...(layers.get(d) ?? []), n.id])
+   154→  })
+   155→  const pos: Record<string, { x: number; y: number }> = {}
+   156→  layers.forEach((ids, d) => {
+   157→    ids.forEach((id, i) => {
+   158→      pos[id] = { x: d * 400, y: i * 280 + 60 }
+   159→    })
+   160→  })
+   161→  useCanvasStore.setState({
+   162→    nodes: nodes.map((n) => ({ ...n, position: pos[n.id] ?? n.position })),
+   163→    dirty: true,
+   164→  })
+   165→}
+   166→
+   167→function CanvasInner() {
+   168→  const wrapper = useRef<HTMLDivElement>(null)
+   169→  const { screenToFlowPosition } = useReactFlow()
+   170→  const nodes = useCanvasStore((s) => s.nodes)
+   171→  const edges = useCanvasStore((s) => s.edges)
+   172→  const snapToGrid = useCanvasStore((s) => s.snapToGrid)
+   173→  const onNodesChange = useCanvasStore((s) => s.onNodesChange)
+   174→  const onEdgesChange = useCanvasStore((s) => s.onEdgesChange)
+   175→  const onConnect = useCanvasStore((s) => s.onConnect)
+   176→  const addNode = useCanvasStore((s) => s.addNode)
+   177→  const removeNode = useCanvasStore((s) => s.removeNode)
+   178→  const duplicateNode = useCanvasStore((s) => s.duplicateNode)
+   179→  const setTemplatesOpen = useCanvasStore((s) => s.setTemplatesOpen)
+   180→  const showToast = useCanvasStore((s) => s.showToast)
+   181→  const toast = useCanvasStore((s) => s.toast)
+   182→  const clearToast = useCanvasStore((s) => s.clearToast)
+   183→
+   184→  const [menu, setMenu] = useState<MenuState | null>(null)
+   185→  const selectedNodeCount = useCanvasStore(
+   186→    (s) => s.nodes.reduce((acc, n) => acc + (n.selected ? 1 : 0), 0),
+   187→  )
+   188→
+   189→  /* ---------- 拖拽添加 ---------- */
+   190→  const onDragOver = useCallback((e: React.DragEvent) => {
+   191→    e.preventDefault()
+   192→    e.dataTransfer.dropEffect = 'move'
+   193→  }, [])
+   194→
+   195→  const onDrop = useCallback(
+   196→    (e: React.DragEvent) => {
+   197→      e.preventDefault()
+   198→      const type = e.dataTransfer.getData('application/ai-node')
+   199→      if (!type || !NODE_SPECS[type]) return
+   200→      const position = screenToFlowPosition({ x: e.clientX, y: e.clientY })
+   201→      addNode(type, position)
+   202→    },
+   203→    [screenToFlowPosition, addNode],
+   204→  )
+   205→
+   206→  /* ---------- 面板点击添加（画布中央） ---------- */
+   207→  useEffect(() => {
+   208→    const handler = (e: Event) => {
+   209→      const type = (e as CustomEvent<string>).detail
+   210→      if (!NODE_SPECS[type]) return
+   211→      const rect = wrapper.current?.getBoundingClientRect()
+   212→      const cx = rect ? rect.left + rect.width / 2 : window.innerWidth / 2
+   213→      const cy = rect ? rect.top + rect.height / 2 : window.innerHeight / 2
+   214→      const position = screenToFlowPosition({ x: cx, y: cy })
+   215→      position.x += (Math.random() - 0.5) * 80
+   216→      position.y += (Math.random() - 0.5) * 60
+   217→      addNode(type, position)
+   218→    }
+   219→    window.addEventListener('ai-canvas:add-node', handler)
+   220→    return () => window.removeEventListener('ai-canvas:add-node', handler)
+   221→  }, [screenToFlowPosition, addNode])
+   222→
+   223→  /* ---------- 素材库：一键插入素材引用节点 ---------- */
+   224→  useEffect(() => {
+   225→    const handler = (e: Event) => {
+   226→      const d = (e as CustomEvent<{ kind: string; url: string; name: string }>).detail
+   227→      if (!d?.url || !NODE_SPECS.asset) return
+   228→      const rect = wrapper.current?.getBoundingClientRect()
+   229→      const cx = rect ? rect.left + rect.width / 2 : window.innerWidth / 2
+   230→      const cy = rect ? rect.top + rect.height / 2 : window.innerHeight / 2
+   231→      const position = screenToFlowPosition({ x: cx, y: cy })
+   232→      position.x += (Math.random() - 0.5) * 100
+   233→      position.y += (Math.random() - 0.5) * 80
+   234→      const store = useCanvasStore.getState()
+   235→      const id = store.addNode('asset', position)
+   236→      if (!id) return
+   237→      store.updateNodeParam(id, 'assetKind', d.kind)
+   238→      store.updateNodeParam(id, 'assetUrl', d.url)
+   239→      store.updateNodeParam(id, 'assetName', d.name)
+   240→      store.updateNodeData(id, { label: d.name || '素材引用' })
+   241→      store.setNodeOutput(id, d.kind, {
+   242→        kind: d.kind as 'image' | 'video' | 'audio',
+   243→        url: d.url,
+   244→        meta: { source: 'asset-library' },
+   245→      })
+   246→      store.setNodeRunState(id, 'success', { stage: '素材就绪', progress: 100 })
+   247→      store.showToast('success', `已插入素材「${d.name}」`)
+   248→    }
+   249→    window.addEventListener('ai-canvas:insert-asset', handler)
+   250→    return () => window.removeEventListener('ai-canvas:insert-asset', handler)
+   251→  }, [screenToFlowPosition])
+   252→
+   253→  /* ---------- 首次进入：自动载入最近作品 ---------- */
+   254→  useEffect(() => {
+   255→    void (async () => {
+   256→      try {
+   257→        const res = await fetch('/api/workflows', { cache: 'no-store' })
+   258→        const j = await res.json()
+   259→        if (j.items?.length > 0) {
+   260→          await openWorkflow(j.items[0].id)
+   261→        }
+   262→      } catch {
+   263→        /* 忽略 */
+   264→      }
+   265→    })()
+   266→     
+   267→  }, [])
+   268→
+   269→  /* ---------- 自动保存 ---------- */
+   270→  useEffect(() => {
+   271→    let timer: ReturnType<typeof setTimeout>
+   272→    const unsub = useCanvasStore.subscribe((s, prev) => {
+   273→      if (s.dirty && !prev?.dirty && s.workflow.id) {
+   274→        // 捕获发起时刻的工作流 id：若到点时画布已切换为其他工作流，
+   275→        // 绝不能用旧 id 保存新内容（会造成数据覆盖），直接放弃本次自动保存
+   276→        const capturedId = s.workflow.id
+   277→        clearTimeout(timer)
+   278→        timer = setTimeout(() => {
+   279→          const st = useCanvasStore.getState()
+   280→          if (
+   281→            st.dirty &&
+   282→            !st.running &&
+   283→            st.workflow.id &&
+   284→            st.workflow.id === capturedId
+   285→          ) {
+   286→            void saveWorkflow()
+   287→          }
+   288→        }, 1800)
+   289→      }
+   290→    })
+   291→    return () => {
+   292→      clearTimeout(timer)
+   293→      unsub()
+   294→    }
+   295→  }, [])
+   296→
+   297→  /* ---------- 快捷键 ---------- */
+   298→  useEffect(() => {
+   299→    const onKey = (e: KeyboardEvent) => {
+   300→      const meta = e.ctrlKey || e.metaKey
+   301→      const target = e.target as HTMLElement | null
+   302→      const typing =
+   303→        !!target &&
+   304→        (target.tagName === 'INPUT' ||
+   305→          target.tagName === 'TEXTAREA' ||
+   306→          target.isContentEditable)
+   307→      if (meta && e.key === 's') {
+   308→        e.preventDefault()
+   309→        void saveWorkflow()
+   310→        return
+   311→      }
+   312→      if (meta && e.key === 'Enter') {
+   313→        e.preventDefault()
+   314→        void runWorkflow()
+   315→        return
+   316→      }
+   317→      if (typing) return
+   318→      const store = useCanvasStore.getState()
+   319→      if (meta && !e.shiftKey && e.key.toLowerCase() === 'z') {
+   320→        e.preventDefault()
+   321→        store.undo()
+   322→      } else if (
+   323→        ((meta && e.shiftKey && e.key.toLowerCase() === 'z') ||
+   324→          (meta && e.key.toLowerCase() === 'y'))
+   325→      ) {
+   326→        e.preventDefault()
+   327→        store.redo()
+   328→      } else if (meta && e.key.toLowerCase() === 'c') {
+   329→        store.copySelection()
+   330→      } else if (meta && e.key.toLowerCase() === 'v') {
+   331→        store.pasteClipboard()
+   332→      } else if (meta && e.key.toLowerCase() === 'g') {
+   333→        e.preventDefault()
+   334→        if (e.shiftKey) {
+   335→          // Ctrl+Shift+G：解组当前选中分组（或包含所选节点的分组）
+   336→          const st = useCanvasStore.getState()
+   337→          let gid = st.selectedGroupId
+   338→          if (!gid) {
+   339→            const selectedIds = new Set(st.nodes.filter((n) => n.selected).map((n) => n.id))
+   340→            const hit = st.groups.find((g) => g.nodeIds.some((id) => selectedIds.has(id)))
+   341→            gid = hit?.id ?? null
+   342→          }
+   343→          if (gid) {
+   344→            st.ungroup(gid)
+   345→          } else {
+   346→            st.showToast('info', '请先选中一个分组再解组')
+   347→          }
+   348→        } else {
+   349→          store.createGroupFromSelection()
+   350→        }
+   351→        return
+   352→      }
+   353→      if (e.key === 'Delete' || e.key === 'Backspace') {
+   354→        // 分组框选中时 Delete = 解组（保留节点）；节点选中时交由 React Flow 删除
+   355→        const st = useCanvasStore.getState()
+   356→        if (st.selectedGroupId) {
+   357→          e.preventDefault()
+   358→          st.ungroup(st.selectedGroupId)
+   359→          return
+   360→        }
+   361→      }
+   362→      if (e.key === 'Escape') {
+   363→        setMenu(null)
+   364→        useCanvasStore.getState().setSelectedGroupId(null)
+   365→      }
+   366→    }
+   367→    window.addEventListener('keydown', onKey)
+   368→    return () => window.removeEventListener('keydown', onKey)
+   369→  }, [])
+   370→
+   371→  /* ---------- Toast ---------- */
+   372→  useEffect(() => {
+   373→    if (!toast) return
+   374→    const t = setTimeout(clearToast, 3200)
+   375→    return () => clearTimeout(t)
+   376→  }, [toast, clearToast])
+   377→
+   378→  /* ---------- 右键菜单 ---------- */
+   379→  const openPaneMenu = useCallback(
+   380→    (e: React.MouseEvent | MouseEvent) => {
+   381→      e.preventDefault()
+   382→      const position = screenToFlowPosition({ x: e.clientX, y: e.clientY })
+   383→      setMenu({ screen: { x: e.clientX, y: e.clientY }, flow: position })
+   384→    },
+   385→    [screenToFlowPosition],
+   386→  )
+   387→
+   388→  const openGroupMenu = useCallback(
+   389→    (e: React.MouseEvent, groupId: string) => {
+   390→      setMenu({
+   391→        screen: { x: e.clientX, y: e.clientY },
+   392→        flow: { x: 0, y: 0 },
+   393→        groupId,
+   394→      })
+   395→    },
+   396→    [],
+   397→  )
+   398→
+   399→  const closeMenu = useCallback(() => setMenu(null), [])
+   400→
+   401→  /* ---------- 连线校验 ---------- */
+   402→  const isValidConnection = useCallback(
+   403→    (conn: { source: string; target: string; sourceHandle: string | null; targetHandle: string | null }) => {
+   404→      const src = useCanvasStore.getState().nodes.find((n) => n.id === conn.source)
+   405→      const tgt = useCanvasStore.getState().nodes.find((n) => n.id === conn.target)
+   406→      if (!src || !tgt || src.id === tgt.id) return false
+   407→      return isConnectionValid(
+   408→        { type: src.type as string, handleId: conn.sourceHandle },
+   409→        { type: tgt.type as string, handleId: conn.targetHandle },
+   410→        src.data,
+   411→      )
+   412→    },
+   413→    [],
+   414→  )
+   415→
+   416→  return (
+   417→    <div className="dark flex h-screen w-screen flex-col overflow-hidden bg-zinc-950 text-zinc-100">
+   418→      <TopBar />
+   419→      <div className="relative flex min-h-0 flex-1">
+   420→        <Palette />
+   421→        <div ref={wrapper} className="relative min-w-0 flex-1" onDrop={onDrop} onDragOver={onDragOver}>
+   422→          <ReactFlow<CanvasNodeData>
+   423→            nodes={nodes}
+   424→            edges={edges}
+   425→            nodeTypes={nodeTypes}
+   426→            edgeTypes={edgeTypes}
+   427→            onNodesChange={onNodesChange}
+   428→            onEdgesChange={onEdgesChange}
+   429→            onConnect={onConnect}
+   430→            isValidConnection={isValidConnection}
+   431→            snapToGrid={snapToGrid}
+   432→            snapGrid={[16, 16]}
+   433→            onBeforeDelete={async ({ nodes: delNodes }) => {
+   434→              if (delNodes.length > 1) {
+   435→                return window.confirm(
+   436→                  `确定删除选中的 ${delNodes.length} 个节点及其连线？`,
+   437→                )
+   438→              }
+   439→              return true
+   440→            }}
+   441→            onPaneContextMenu={openPaneMenu}
+   442→            onPaneClick={(e) => {
+   443→              closeMenu()
+   444→              useCanvasStore.getState().setSelectedGroupId(null)
+   445→            }}
+   446→            onMoveStart={closeMenu}
+   447→            onNodeClick={() => useCanvasStore.getState().setSelectedGroupId(null)}
+   448→            onNodeContextMenu={(e, node) => {
+   449→              e.preventDefault()
+   450→              setMenu({
+   451→                screen: { x: e.clientX, y: e.clientY },
+   452→                flow: node.position,
+   453→                nodeId: node.id,
+   454→              })
+   455→            }}
+   456→            onNodeDragStart={closeMenu}
+   457→            defaultEdgeOptions={{ type: 'canvas' }}
+   458→            deleteKeyCode={['Delete', 'Backspace']}
+   459→            multiSelectionKeyCode={['Shift', 'Meta']}
+   460→            selectionOnDrag
+   461→            panOnDrag={[1, 2]}
+   462→            panOnScroll
+   463→            zoomOnDoubleClick={false}
+   464→            colorMode="dark"
+   465→            minZoom={0.2}
+   466→            maxZoom={2.2}
+   467→            proOptions={{ hideAttribution: false }}
+   468→            className="canvas-bg"
+   469→          >
+   470→            <Background
+   471→              variant={BackgroundVariant.Dots}
+   472→              gap={22}
+   473→              size={1.4}
+   474→              color="#3f3f46"
+   475→              className="opacity-70"
+   476→            />
+   477→            <Controls
+   478→              showInteractive={false}
+   479→              position="bottom-right"
+   480→              className="!mb-10 !shadow-none"
+   481→            />
+   482→            <MiniMap
+   483→              pannable
+   484→              zoomable
+   485→              position="bottom-right"
+   486→              className="!mb-10 !mr-14 hidden md:block"
+   487→              style={{ width: 168, height: 108, borderRadius: 12 }}
+   488→              maskColor="rgba(9,9,11,0.72)"
+   489→              nodeColor={(n) => {
+   490→                const rs = (n.data as CanvasNodeData | undefined)?.runState
+   491→                if (rs === 'running') return '#f59e0b'
+   492→                if (rs === 'queued') return '#38bdf8'
+   493→                if (rs === 'failed') return '#f43f5e'
+   494→                return getAccent(NODE_SPECS[n.type ?? '']?.accent).hex
+   495→              }}
+   496→              nodeStrokeColor={(n) => {
+   497→                const rs = (n.data as CanvasNodeData | undefined)?.runState
+   498→                if (rs === 'running') return '#fde68a'
+   499→                if (rs === 'failed') return '#fda4af'
+   500→                return 'transparent'
+   501→              }}
+   502→              nodeStrokeWidth={2}
+   503→            />
+   504→          </ReactFlow>
+   505→
+   506→          {/* 节点分组渲染层（overlay，跟随视口 transform） */}
+   507→          <GroupLayer onGroupContextMenu={openGroupMenu} />
+   508→
+   509→          {/* 右侧 Inspector 属性面板（选中单个节点时） */}
+   510→          <Inspector />
+   511→
+   512→          {/* 空画布引导 */}
+   513→          {nodes.length === 0 && (
+   514→            <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
+   515→              <div className="pointer-events-auto flex max-w-sm flex-col items-center gap-3 rounded-2xl border border-zinc-800/80 bg-zinc-950/80 px-8 py-8 text-center shadow-2xl backdrop-blur">
+   516→                <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-amber-500/25 to-fuchsia-500/25">
+   517→                  <Sparkles className="h-6 w-6 text-amber-300" />
+   518→                </span>
+   519→                <h3 className="text-[15px] font-semibold text-zinc-100">开始你的 AI 视频创作</h3>
+   520→                <p className="text-[11px] leading-relaxed text-zinc-500">
+   521→                  从左侧节点库拖入「提示词」「文生视频」等节点，
+   522→                  <br />
+   523→                  连线编排工作流，一键运行生成
+   524→                </p>
+   525→                <button
+   526→                  onClick={() => setTemplatesOpen(true)}
+   527→                  className="mt-1 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-2 text-[12px] font-semibold text-zinc-950 shadow-[0_0_24px_-6px_rgba(245,158,11,0.7)] transition hover:from-amber-400 hover:to-orange-400"
+   528→                >
+   529→                  浏览模板快速开始
+   530→                </button>
+   531→                <p className="mt-1 flex items-center gap-1 text-[10px] text-zinc-600">
+   532→                  <MousePointer2 className="h-3 w-3" />
+   533→                  也可以在画布任意处右键添加节点
+   534→                </p>
+   535→              </div>
+   536→            </div>
+   537→          )}
+   538→
+   539→          {/* 右键菜单 */}
+   540→          {menu && (
+   541→            <div
+   542→              className="fixed z-50 w-52 overflow-hidden rounded-xl border border-zinc-700/80 bg-zinc-900/97 py-1 shadow-2xl backdrop-blur"
+   543→              style={{
+   544→                left: Math.min(menu.screen.x, window.innerWidth - 220),
+   545→                top: Math.min(menu.screen.y, window.innerHeight - 380),
+   546→              }}
+   547→              onMouseLeave={closeMenu}
+   548→            >
+   549→              {menu.groupId ? (
+   550→                <GroupMenuItems
+   551→                  groupId={menu.groupId}
+   552→                  closeMenu={closeMenu}
+   553→                />
+   554→              ) : menu.nodeId ? (
+   555→                <>
+   556→                  <p className="border-b border-zinc-800 px-3 pb-1.5 pt-1 text-[9px] uppercase tracking-wider text-zinc-600">
+   557→                    节点操作
+   558→                  </p>
+   559→                  <MenuItem
+   560→                    icon={<Play className="h-3.5 w-3.5 text-amber-300" />}
+   561→                    label="仅运行此节点"
+   562→                    onClick={() => {
+   563→                      void runNode(menu.nodeId!)
+   564→                      closeMenu()
+   565→                    }}
+   566→                  />
+   567→                  <MenuItem
+   568→                    icon={<Copy className="h-3.5 w-3.5" />}
+   569→                    label="复制节点"
+   570→                    onClick={() => {
+   571→                      duplicateNode(menu.nodeId!)
+   572→                      closeMenu()
+   573→                    }}
+   574→                  />
+   575→                  <MenuItem
+   576→                    icon={<Trash2 className="h-3.5 w-3.5 text-rose-300" />}
+   577→                    label="删除节点"
+   578→                    danger
+   579→                    onClick={() => {
+   580→                      removeNode(menu.nodeId!)
+   581→                      closeMenu()
+   582→                    }}
+   583→                  />
+   584→                </>
+   585→              ) : (
+   586→                <>
+   587→                  {selectedNodeCount >= 2 && (
+   588→                    <>
+   589→                      <MenuItem
+   590→                        icon={<Boxes className="h-3.5 w-3.5 text-sky-300" />}
+   591→                        label={`将 ${selectedNodeCount} 个所选节点编组`}
+   592→                        onClick={() => {
+   593→                          useCanvasStore.getState().createGroupFromSelection()
+   594→                          closeMenu()
+   595→                        }}
+   596→                      />
+   597→                      <div className="mx-2 my-1 h-px bg-zinc-800" />
+   598→                    </>
+   599→                  )}
+   600→                  <p className="border-b border-zinc-800 px-3 pb-1.5 pt-1 text-[9px] uppercase tracking-wider text-zinc-600">
+   601→                    添加节点
+   602→                  </p>
+   603→                  <div className="max-h-72 overflow-y-auto scrollbar-thin">
+   604→                    {NODE_TYPE_LIST.map((s) => {
+   605→                      const accent = getAccent(s.accent)
+   606→                      return (
+   607→                        <MenuItem
+   608→                          key={s.type}
+   609→                          icon={
+   610→                            <span className={cn('h-2 w-2 rounded-full', accent.solid)} />
+   611→                          }
+   612→                          label={s.name}
+   613→                          onClick={() => {
+   614→                            addNode(s.type, menu.flow)
+   615→                            closeMenu()
+   616→                          }}
+   617→                        />
+   618→                      )
+   619→                    })}
+   620→                  </div>
+   621→                </>
+   622→              )}
+   623→            </div>
+   624→          )}
+   625→
+   626→          {/* Toast */}
+   627→          {toast && (
+   628→            <div
+   629→              className={cn(
+   630→                'absolute bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-xl border px-4 py-2.5 text-[12px] shadow-2xl backdrop-blur animate-in fade-in slide-in-from-bottom-2 duration-300',
+   631→                toast.type === 'success' && 'border-emerald-500/30 bg-emerald-500/15 text-emerald-200',
+   632→                toast.type === 'error' && 'border-rose-500/30 bg-rose-500/15 text-rose-200',
+   633→                toast.type === 'info' && 'border-zinc-600/40 bg-zinc-800/90 text-zinc-200',
+   634→              )}
+   635→            >
+   636→              {toast.message}
+   637→            </div>
+   638→          )}
+   639→        </div>
+   640→      </div>
+   641→      <StatusBar />
+   642→      <LibraryDialog />
+   643→      <TemplatesDialog />
+   644→      <AssetsDialog />
+   645→      <HistoryDialog />
+   646→    </div>
+   647→  )
+   648→}
+   649→
+   650→function MenuItem({
+   651→  icon,
+   652→  label,
+   653→  onClick,
+   654→  danger,
+   655→}: {
+   656→  icon: React.ReactNode
+   657→  label: string
+   658→  onClick: () => void
+   659→  danger?: boolean
+   660→}) {
+   661→  return (
+   662→    <button
+   663→      onClick={onClick}
+   664→      className={cn(
+   665→        'flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] transition',
+   666→        danger ? 'text-rose-300 hover:bg-rose-500/15' : 'text-zinc-300 hover:bg-zinc-800',
+   667→      )}
+   668→    >
+   669→      {icon}
+   670→      {label}
+   671→    </button>
+   672→  )
+   673→}
+   674→
+   675→export function Editor() {
+   676→  return (
+   677→    <ReactFlowProvider>
+   678→      <CanvasInner />
+   679→    </ReactFlowProvider>
+   680→  )
+   681→}
+   682→
+   683→/** 分组右键菜单项：重命名 / 换色 / 解组 / 删除分组与成员 */
+   684→function GroupMenuItems({
+   685→  groupId,
+   686→  closeMenu,
+   687→}: {
+   688→  groupId: string
+   689→  closeMenu: () => void
+   690→}) {
+   691→  const group = useCanvasStore((s) => s.groups.find((g) => g.id === groupId))
+   692→  if (!group) return null
+   693→  const color = getGroupColor(group.color)
+   694→  return (
+   695→    <>
+   696→      <p className="flex items-center gap-1.5 border-b border-zinc-800 px-3 pb-1.5 pt-1 text-[9px] uppercase tracking-wider text-zinc-600">
+   697→        <span className={cn('h-2 w-2 rounded-full', color.dot)} />
+   698→        分组 · {group.nodeIds.length} 节点
+   699→      </p>
+   700→      <MenuItem
+   701→        icon={<Pencil className="h-3.5 w-3.5" />}
+   702→        label="重命名分组"
+   703→        onClick={() => {
+   704→          const name = window.prompt('重命名分组', group.name)
+   705→          if (name && name.trim()) {
+   706→            useCanvasStore.getState().renameGroup(group.id, name.trim())
+   707→          }
+   708→          closeMenu()
+   709→        }}
+   710→      />
+   711→      <div className="flex items-center gap-1.5 px-3 py-1.5">
+   712→        <span className="text-[10px] text-zinc-500">颜色</span>
+   713→        <span className="flex items-center gap-1">
+   714→          {GROUP_COLORS.map((c) => (
+   715→            <button
+   716→              key={c.key}
+   717→              onClick={() => useCanvasStore.getState().setGroupColor(group.id, c.key)}
+   718→              className={cn(
+   719→                'h-3.5 w-3.5 rounded-full border transition hover:scale-110',
+   720→                c.dot,
+   721→                group.color === c.key
+   722→                  ? 'border-white/80 ring-1 ring-white/40'
+   723→                  : 'border-transparent',
+   724→              )}
+   725→              title={c.label}
+   726→            />
+   727→          ))}
+   728→        </span>
+   729→      </div>
+   730→      <div className="mx-2 my-0.5 h-px bg-zinc-800" />
+   731→      <MenuItem
+   732→        icon={<UngroupIcon className="h-3.5 w-3.5 text-zinc-300" />}
+   733→        label="解组（保留节点）"
+   734→        onClick={() => {
+   735→          useCanvasStore.getState().ungroup(group.id)
+   736→          closeMenu()
+   737→        }}
+   738→      />
+   739→      <MenuItem
+   740→        icon={<Trash2 className="h-3.5 w-3.5 text-rose-300" />}
+   741→        label="删除分组与全部成员"
+   742→        danger
+   743→        onClick={() => {
+   744→          if (
+   745→            window.confirm(
+   746→              `确定删除分组「${group.name}」及其 ${group.nodeIds.length} 个节点？可用撤销恢复。`,
+   747→            )
+   748→          ) {
+   749→            useCanvasStore.getState().deleteGroupAndNodes(group.id)
+   750→          }
+   751→          closeMenu()
+   752→        }}
+   753→      />
+   754→    </>
+   755→  )
+   756→}
+   757→

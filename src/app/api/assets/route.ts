@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import fs from 'fs/promises'
 import path from 'path'
+import { db } from '@/lib/db'
 
 /**
  * 素材库 API：浏览 /generated 与 /uploads 下的全部媒体产物
@@ -156,7 +157,93 @@ export async function PATCH(req: NextRequest) {
       return NextResponse.json({ error: '同名文件已存在' }, { status: 409 })
     }
     await fs.rename(target, dest)
-    return NextResponse.json({ url: `/${m[1]}/${newName}`, name: newName })
+
+    /** 级联更新：同步所有工作流中引用旧素材地址的 asset 节点（参数 + 输出 + 输入快照） */
+    let updatedRefs = 0
+    let updatedWorkflows = 0
+    try {
+      const workflows = await db.workflow.findMany({
+        select: { id: true, graph: true },
+      })
+      const oldPath = `/${m[1]}/${oldName}`
+      const newPath = `/${m[1]}/${newName}`
+      const extKind = KIND_BY_EXT[ext]
+      for (const wf of workflows) {
+        let graph: {
+          nodes?: {
+            id?: string
+            type?: string
+            data?: {
+              params?: Record<string, unknown>
+              outputs?: Record<string, { kind?: string; url?: string }>
+              inputs?: Record<string, { kind?: string; url?: string }>
+            }
+          }[]
+        } | null = null
+        try {
+          graph = JSON.parse(wf.graph)
+        } catch {
+          continue
+        }
+        if (!graph?.nodes || !Array.isArray(graph.nodes)) continue
+        let changed = false
+        for (const node of graph.nodes) {
+          const params = node?.data?.params
+          const isAssetRef =
+            node?.type === 'asset' &&
+            params &&
+            typeof params.assetUrl === 'string' &&
+            (params.assetUrl === oldPath ||
+              // 老数据可能存的是完整 URL，取 pathname 比对
+              (() => {
+                try {
+                  return new URL(String(params.assetUrl)).pathname === oldPath
+                } catch {
+                  return false
+                }
+              })())
+          if (isAssetRef) {
+            params.assetUrl = newPath
+            params.assetName = newName
+            const outputs = node.data?.outputs
+            if (outputs && extKind && outputs[extKind]?.url) {
+              outputs[extKind].url = newPath
+            }
+            changed = true
+            updatedRefs++
+          } else {
+            // 非 asset 节点的运行时输入/输出快照也可能引用旧地址，一并同步
+            const buckets = [node?.data?.inputs, node?.data?.outputs]
+            for (const bucket of buckets) {
+              if (!bucket) continue
+              for (const key of Object.keys(bucket)) {
+                if (bucket[key]?.url === oldPath) {
+                  bucket[key].url = newPath
+                  changed = true
+                  updatedRefs++
+                }
+              }
+            }
+          }
+        }
+        if (changed) {
+          await db.workflow.update({
+            where: { id: wf.id },
+            data: { graph: JSON.stringify(graph) },
+          })
+          updatedWorkflows++
+        }
+      }
+    } catch {
+      // 级联失败不阻塞重命名本身
+    }
+
+    return NextResponse.json({
+      url: `/${m[1]}/${newName}`,
+      name: newName,
+      updatedRefs,
+      updatedWorkflows,
+    })
   } catch (e) {
     return NextResponse.json(
       { error: e instanceof Error ? e.message : '重命名失败' },

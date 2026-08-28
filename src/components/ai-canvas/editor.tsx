@@ -30,6 +30,9 @@ import {
   Boxes,
   Pencil,
   Ungroup as UngroupIcon,
+  ChevronsLeft,
+  ChevronsRight,
+  FoldVertical,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -41,7 +44,7 @@ import {
   type CanvasNodeData,
 } from '@/lib/ai-canvas/types'
 import { useCanvasStore } from '@/lib/ai-canvas/store'
-import { runNode, runWorkflow } from '@/lib/ai-canvas/executor'
+import { runNode, runWorkflow, runGroup } from '@/lib/ai-canvas/executor'
 import { saveWorkflow, openWorkflow } from '@/lib/ai-canvas/persistence'
 import { getAccent } from './nodes/accents'
 import { GraphNode } from './nodes/graph-node'
@@ -697,6 +700,43 @@ function GroupMenuItems({
         <span className={cn('h-2 w-2 rounded-full', color.dot)} />
         分组 · {group.nodeIds.length} 节点
       </p>
+      <MenuItem
+        icon={<Play className="h-3.5 w-3.5 text-amber-300" />}
+        label="运行分组（自动补齐上游）"
+        onClick={() => {
+          void runGroup(group.id)
+          closeMenu()
+        }}
+      />
+      <MenuItem
+        icon={
+          group.collapsed ? (
+            <ChevronsRight className="h-3.5 w-3.5 text-emerald-300" />
+          ) : (
+            <ChevronsLeft className="h-3.5 w-3.5 text-sky-300" />
+          )
+        }
+        label={group.collapsed ? '展开分组' : '折叠分组（收起为卡片）'}
+        onClick={() => {
+          useCanvasStore.getState().toggleGroupCollapse(group.id)
+          closeMenu()
+        }}
+      />
+      <MenuItem
+        icon={<FoldVertical className="h-3.5 w-3.5 text-zinc-300" />}
+        label="折叠全部分组 / 展开"
+        onClick={() => {
+          const st = useCanvasStore.getState()
+          const anyOpen = st.groups.some((g) => !g.collapsed)
+          st.groups.forEach((g) => {
+            if (anyOpen !== !!g.collapsed) {
+              st.setGroupCollapsed(g.id, anyOpen, { silent: true })
+            }
+          })
+          st.showToast('info', anyOpen ? '已折叠全部分组' : '已展开全部分组')
+          closeMenu()
+        }}
+      />
       <MenuItem
         icon={<Pencil className="h-3.5 w-3.5" />}
         label="重命名分组"

@@ -40,6 +40,8 @@ export interface CanvasGroup {
   name: string
   color: string
   nodeIds: string[]
+  /** 折叠状态：成员节点隐藏，分组框收起为单卡片 */
+  collapsed?: boolean
 }
 
 interface HistoryEntry {
@@ -113,6 +115,8 @@ export interface CanvasStore {
   createGroupFromSelection: () => string | null
   renameGroup: (id: string, name: string) => void
   setGroupColor: (id: string, color: string) => void
+  toggleGroupCollapse: (id: string) => void
+  setGroupCollapsed: (id: string, collapsed: boolean, options?: { silent?: boolean }) => void
   ungroup: (id: string) => void
   deleteGroupAndNodes: (id: string) => void
   translateNodesTo: (
@@ -569,14 +573,47 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
       dirty: true,
     })),
 
+  /** 折叠/展开分组：成员节点同步隐藏/恢复（快照可撤销） */
+  toggleGroupCollapse: (id) => {
+    const g = get().groups.find((x) => x.id === id)
+    if (!g) return
+    get().setGroupCollapsed(id, !g.collapsed)
+    get().showToast(
+      'info',
+      g.collapsed ? `已展开「${g.name}」` : `已折叠「${g.name}」，点击卡片可重新展开`,
+    )
+  },
+
+  setGroupCollapsed: (id, collapsed, options) => {
+    const g = get().groups.find((x) => x.id === id)
+    if (!g) return
+    if (!options?.silent) get().commit()
+    const ids = new Set(g.nodeIds)
+    set((s) => ({
+      groups: s.groups.map((x) =>
+        x.id === id ? { ...x, collapsed } : x,
+      ),
+      nodes: s.nodes.map((n) =>
+        ids.has(n.id) ? { ...n, hidden: collapsed } : n,
+      ),
+      dirty: true,
+    }))
+  },
+
   ungroup: (id) => {
     const { groups } = get()
-    if (!groups.some((g) => g.id === id)) return
+    const g = groups.find((x) => x.id === id)
+    if (!g) return
     get().commit()
+    const ids = new Set(g.nodeIds)
     set({
-      groups: groups.filter((g) => g.id !== id),
+      groups: groups.filter((x) => x.id !== id),
       selectedGroupId: null,
       dirty: true,
+      // 折叠状态下解组：恢复成员可见性，避免节点“消失”
+      nodes: get().nodes.map((n) =>
+        ids.has(n.id) ? { ...n, hidden: false } : n,
+      ),
     })
   },
 
@@ -614,11 +651,20 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
   setWorkflow: (meta) =>
     set((s) => ({ workflow: { ...s.workflow, ...meta }, dirty: true })),
 
-  loadGraph: (graph, meta) =>
+  loadGraph: (graph, meta) => {
+    const groups = graph.groups ?? []
+    // 恢复折叠状态：折叠组的成员节点载入即隐藏
+    const collapsedIds = new Set(
+      groups.filter((g) => g.collapsed).flatMap((g) => g.nodeIds),
+    )
     set((s) => ({
-      nodes: graph.nodes ?? [],
+      nodes: collapsedIds.size
+        ? (graph.nodes ?? []).map((n) =>
+            collapsedIds.has(n.id) ? { ...n, hidden: true } : n,
+          )
+        : graph.nodes ?? [],
       edges: graph.edges ?? [],
-      groups: graph.groups ?? [],
+      groups,
       selectedGroupId: null,
       past: [],
       future: [],
@@ -626,7 +672,8 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
       workflow: meta ? { ...s.workflow, ...meta } : s.workflow,
       dirty: false,
       running: false,
-    })),
+    }))
+  },
 
   markSaved: (id, updatedAt) =>
     set((s) => ({

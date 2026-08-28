@@ -23,6 +23,7 @@ import {
   AlertCircle,
   UploadCloud,
   Download,
+  HardDriveDownload,
   CircleDashed,
   RotateCcw,
   AudioLines,
@@ -41,6 +42,7 @@ import {
 } from '@/lib/ai-canvas/types'
 import { useCanvasStore } from '@/lib/ai-canvas/store'
 import { runNode } from '@/lib/ai-canvas/executor'
+import { exportUrlToDownload } from '@/lib/ai-canvas/client-export'
 import { getAccent } from './accents'
 import { ParamControl } from './param-controls'
 
@@ -109,16 +111,39 @@ function PortRow({
 
 /* ------------------------------ 输出内容预览 ------------------------------ */
 
-function OutputImage({ url, className }: { url?: string; className?: string }) {
+function OutputImage({ url, className, downloadable }: { url?: string; className?: string; downloadable?: boolean }) {
   if (!url) return null
   return (
-     
-    <img
-      src={url}
-      alt="生成结果"
-      className={cn('w-full rounded-lg border border-zinc-700/60 object-cover', className)}
-      draggable={false}
-    />
+    <div className={cn('group/img relative', className?.includes('h-') && 'h-full w-full')}>
+      <img
+        src={url}
+        alt="生成结果"
+        className={cn('w-full rounded-lg border border-zinc-700/60 object-cover', className)}
+        draggable={false}
+      />
+      {downloadable && (
+        <div
+          nodrag=""
+          className="absolute right-1.5 top-1.5 hidden items-center gap-0.5 rounded-md border border-zinc-700/60 bg-black/65 p-0.5 backdrop-blur transition group-hover/img:flex"
+        >
+          <a
+            href={url}
+            download
+            className="rounded p-1 text-zinc-300 transition hover:bg-black/70 hover:text-white"
+            title="浏览器下载"
+          >
+            <Download className="h-3 w-3" />
+          </a>
+          <button
+            onClick={() => void exportUrlToDownload(url)}
+            className="rounded p-1 text-zinc-300 transition hover:bg-sky-500/25 hover:text-sky-200"
+            title="导出到 download 归档目录"
+          >
+            <HardDriveDownload className="h-3 w-3" />
+          </button>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -133,15 +158,26 @@ function OutputVideo({ url, poster }: { url?: string; poster?: string }) {
         playsInline
         className="w-full rounded-lg border border-zinc-700/60 bg-black"
       />
-      <a
-        href={url}
-        download
+      <div
         nodrag=""
-        className="absolute right-1.5 top-1.5 hidden rounded-md bg-black/60 p-1.5 text-zinc-300 backdrop-blur transition hover:bg-black/80 hover:text-white group-hover/video:block"
-        title="下载视频"
+        className="absolute right-1.5 top-1.5 hidden items-center gap-0.5 rounded-md border border-zinc-700/60 bg-black/65 p-0.5 backdrop-blur transition group-hover/video:flex"
       >
-        <Download className="h-3 w-3" />
-      </a>
+        <a
+          href={url}
+          download
+          className="rounded p-1 text-zinc-300 transition hover:bg-black/70 hover:text-white"
+          title="浏览器下载"
+        >
+          <Download className="h-3 w-3" />
+        </a>
+        <button
+          onClick={() => void exportUrlToDownload(url)}
+          className="rounded p-1 text-zinc-300 transition hover:bg-sky-500/25 hover:text-sky-200"
+          title="导出到 download 归档目录"
+        >
+          <HardDriveDownload className="h-3 w-3" />
+        </button>
+      </div>
     </div>
   )
 }
@@ -159,14 +195,23 @@ function OutputAudio({ url, compact }: { url?: string; compact?: boolean }) {
       <div className="mb-1 flex items-center gap-1.5 px-0.5">
         <Volume2 className="h-3 w-3 text-rose-300" />
         <span className="text-[9px] text-rose-200/70">配音音频 · WAV</span>
-        <a
-          href={url}
-          download
-          className="ml-auto rounded p-0.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-rose-300"
-          title="下载音频"
-        >
-          <Download className="h-3 w-3" />
-        </a>
+        <div className="ml-auto flex items-center gap-0.5">
+          <a
+            href={url}
+            download
+            className="rounded p-0.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-rose-300"
+            title="浏览器下载"
+          >
+            <Download className="h-3 w-3" />
+          </a>
+          <button
+            onClick={() => void exportUrlToDownload(url)}
+            className="rounded p-0.5 text-zinc-400 transition hover:bg-sky-500/20 hover:text-sky-300"
+            title="导出到 download 归档目录"
+          >
+            <HardDriveDownload className="h-3 w-3" />
+          </button>
+        </div>
       </div>
       <audio src={url} controls className="h-8 w-full" />
     </div>
@@ -307,7 +352,7 @@ function NodeBody({
       <div className="space-y-2">
         {url ? (
           <div className="space-y-2">
-            <OutputImage url={url} className="max-h-36" />
+            <OutputImage url={url} className="max-h-36" downloadable />
             <UploadZone nodeId={id} />
           </div>
         ) : (
@@ -327,7 +372,7 @@ function NodeBody({
         {url ? (
           kind === 'image' ? (
             <a href={url} target="_blank" rel="noreferrer" nodrag="">
-              <OutputImage url={url} className="max-h-40" />
+              <OutputImage url={url} className="max-h-40" downloadable />
             </a>
           ) : kind === 'video' ? (
             <OutputVideo url={url} />
@@ -367,7 +412,7 @@ function NodeBody({
         {input?.url ? (
           kind === 'image' ? (
             <a href={input.url} target="_blank" rel="noreferrer" nodrag="">
-              <OutputImage url={input.url} className="max-h-52" />
+              <OutputImage url={input.url} className="max-h-52" downloadable />
             </a>
           ) : kind === 'video' ? (
             <OutputVideo
@@ -427,7 +472,7 @@ function NodeBody({
           {running ? (
             <RunningPlaceholder label="生成中" progress={data.progress ?? 0} stage={data.stage} />
           ) : outputs.image?.url ? (
-            <OutputImage url={outputs.image.url} className="max-h-44" />
+            <OutputImage url={outputs.image.url} className="max-h-44" downloadable />
           ) : data.runState === 'failed' ? (
             <div className="rounded-lg border border-rose-500/30 bg-rose-500/5 p-2 text-[10px] text-rose-300">
               {data.error || '生成失败'}

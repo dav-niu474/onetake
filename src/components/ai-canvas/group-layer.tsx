@@ -8,20 +8,32 @@
  * 交互：
  * - 框体跟随成员节点的包围盒自动计算位置与尺寸
  * - 拖拽框体 = 整体平移全部成员（绝对定位 + 偏移量，无累积漂移）
- * - 双击标签重命名；头部工具条支持换色 / 解组；右键呼出分组菜单
+ * - 双击标签重命名；头部工具条支持换色 / 折叠 / 解组；右键呼出分组菜单
+ * - 折叠：成员节点隐藏（node.hidden），框体收起为紧凑卡片，可拖拽移动
  */
 
 import { useMemo, useRef } from 'react'
 import { useReactFlow, useStore } from '@xyflow/react'
-import { Users, Ungroup as UngroupIcon, Pencil } from 'lucide-react'
+import {
+  Users,
+  Ungroup as UngroupIcon,
+  Pencil,
+  ChevronsLeft,
+  ChevronsRight,
+  Boxes,
+} from 'lucide-react'
 import { useCanvasStore, type CanvasGroup } from '@/lib/ai-canvas/store'
 import { NODE_SPECS, getGroupColor } from '@/lib/ai-canvas/types'
 import { cn } from '@/lib/utils'
 
-/** 框体相对成员包围盒的外边距（顶部预留标签栏空间） */
+/** 框体相对成员包围盒的外边距（标签栏渲染于框体内部顶部） */
 const PAD_X = 28
-const PAD_TOP = 52
+const PAD_TOP = 44
 const PAD_BOTTOM = 28
+
+/** 折叠卡片尺寸 */
+const CARD_W = 216
+const CARD_H = 64
 
 /** 估算节点尺寸（优先实测值，回退注册表宽度与估计高度） */
 function nodeSize(n: { id: string; type?: string; measured?: { width?: number; height?: number } | null }) {
@@ -39,7 +51,7 @@ export interface GroupBounds {
   missing: number
 }
 
-/** 计算全部分组的包围盒 */
+/** 计算全部分组的包围盒（折叠组返回锚定成员左上角的固定卡片尺寸） */
 export function computeGroupBounds(
   groups: CanvasGroup[],
   nodes: { id: string; type?: string; position: { x: number; y: number }; measured?: { width?: number; height?: number } | null }[],
@@ -65,28 +77,24 @@ export function computeGroupBounds(
       maxY = Math.max(maxY, n.position.y + h)
     }
     if (minX === Infinity) continue
-    out.push({
-      group: g,
-      x: minX - PAD_X,
-      y: minY - PAD_TOP,
-      w: maxX - minX + PAD_X * 2,
-      h: maxY - minY + PAD_TOP + PAD_BOTTOM,
-      missing,
-    })
+    if (g.collapsed) {
+      out.push({ group: g, x: minX, y: minY, w: CARD_W, h: CARD_H, missing })
+    } else {
+      out.push({
+        group: g,
+        x: minX - PAD_X,
+        y: minY - PAD_TOP,
+        w: maxX - minX + PAD_X * 2,
+        h: maxY - minY + PAD_TOP + PAD_BOTTOM,
+        missing,
+      })
+    }
   }
   return out
 }
 
-interface GroupFrameProps {
-  bounds: GroupBounds
-  selected: boolean
-  onSelect: () => void
-  onContextMenu: (e: React.MouseEvent) => void
-}
-
-function GroupFrame({ bounds, selected, onSelect, onContextMenu }: GroupFrameProps) {
-  const { group, x, y, w, h } = bounds
-  const color = getGroupColor(group.color)
+/** 分组框/卡片通用拖拽：整体平移全部成员（含隐藏节点） */
+function useGroupDrag() {
   const { screenToFlowPosition } = useReactFlow()
   const dragState = useRef<{
     startFlow: { x: number; y: number }
@@ -94,11 +102,11 @@ function GroupFrame({ bounds, selected, onSelect, onContextMenu }: GroupFramePro
     moved: boolean
   } | null>(null)
 
-  const startDrag = (e: React.MouseEvent) => {
+  const onMouseDown = (e: React.MouseEvent, group: CanvasGroup) => {
     if (e.button !== 0) return
     if ((e.target as HTMLElement).closest('[data-frame-ui]')) return // 头部按钮不触发拖拽
     e.stopPropagation()
-    onSelect()
+    useCanvasStore.getState().setSelectedGroupId(group.id)
     const store = useCanvasStore.getState()
     const members = store.nodes.filter((n) => group.nodeIds.includes(n.id))
     if (members.length === 0) return
@@ -134,6 +142,21 @@ function GroupFrame({ bounds, selected, onSelect, onContextMenu }: GroupFramePro
     window.addEventListener('mouseup', onUp)
   }
 
+  return onMouseDown
+}
+
+interface GroupFrameProps {
+  bounds: GroupBounds
+  selected: boolean
+  onSelect: () => void
+  onContextMenu: (e: React.MouseEvent) => void
+}
+
+function GroupFrame({ bounds, selected, onSelect, onContextMenu }: GroupFrameProps) {
+  const { group, x, y, w, h } = bounds
+  const color = getGroupColor(group.color)
+  const startDrag = useGroupDrag()
+
   const rename = () => {
     const name = window.prompt('重命名分组', group.name)
     if (name && name.trim()) {
@@ -146,6 +169,69 @@ function GroupFrame({ bounds, selected, onSelect, onContextMenu }: GroupFramePro
     useCanvasStore.getState().ungroup(group.id)
   }
 
+  const toggleCollapse = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    useCanvasStore.getState().toggleGroupCollapse(group.id)
+  }
+
+  if (group.collapsed) {
+    return (
+      <div
+        data-group-frame={group.id}
+        className={cn(
+          'pointer-events-auto group absolute cursor-grab overflow-hidden rounded-xl border shadow-[0_10px_36px_-14px_rgba(0,0,0,0.9)] backdrop-blur transition-all hover:shadow-[0_14px_44px_-14px_rgba(0,0,0,1)] active:cursor-grabbing',
+          color.border,
+          color.bg,
+          selected && 'ring-1 ring-white/20',
+        )}
+        style={{ left: x, top: y, width: w, height: h }}
+        onMouseDown={(e) => startDrag(e, group)}
+        onContextMenu={onContextMenu}
+        onDoubleClick={toggleCollapse}
+        title="双击展开分组"
+      >
+        {/* 渐变装饰条 */}
+        <span className={cn('absolute inset-x-0 top-0 h-[3px] opacity-80', color.dot)} />
+        <div className="flex h-full items-center gap-2.5 px-3">
+          <span
+            className={cn(
+              'flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border',
+              color.border,
+              color.chip,
+            )}
+          >
+            <Boxes className="h-4 w-4" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[11px] font-semibold text-zinc-100">{group.name}</p>
+            <p className="mt-0.5 flex items-center gap-1 text-[9px] text-zinc-500">
+              <Users className="h-2.5 w-2.5" />
+              {group.nodeIds.length} 个节点 · 已折叠
+            </p>
+          </div>
+          {selected && (
+            <span className="flex items-center gap-0.5 rounded-md border border-zinc-700/80 bg-zinc-900/90 p-0.5 shadow-sm" data-frame-ui>
+              <button
+                onClick={toggleCollapse}
+                className="rounded p-1 text-zinc-400 transition hover:bg-zinc-800 hover:text-emerald-300"
+                title="展开分组"
+              >
+                <ChevronsRight className="h-3 w-3" />
+              </button>
+              <button
+                onClick={ungroup}
+                className="rounded p-1 text-zinc-400 transition hover:bg-rose-500/15 hover:text-rose-300"
+                title="解组（保留节点）"
+              >
+                <UngroupIcon className="h-3 w-3" />
+              </button>
+            </span>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div
       data-group-frame={group.id}
@@ -156,12 +242,12 @@ function GroupFrame({ bounds, selected, onSelect, onContextMenu }: GroupFramePro
         selected && 'shadow-[0_0_0_1px_rgba(255,255,255,0.08),0_8px_40px_-12px_rgba(0,0,0,0.8)]',
       )}
       style={{ left: x, top: y, width: w, height: h }}
-      onMouseDown={startDrag}
+      onMouseDown={(e) => startDrag(e, group)}
       onContextMenu={onContextMenu}
     >
-      {/* 标签栏 */}
+      {/* 标签栏（框体内部顶部，避免被顶栏遮挡） */}
       <div
-        className="pointer-events-auto absolute -top-[26px] left-2 flex max-w-[calc(100%-16px)] items-center gap-1.5"
+        className="pointer-events-auto absolute left-2.5 top-2 flex max-w-[calc(100%-16px)] items-center gap-1.5"
         onDoubleClick={(e) => {
           e.stopPropagation()
           rename()
@@ -179,6 +265,13 @@ function GroupFrame({ bounds, selected, onSelect, onContextMenu }: GroupFramePro
         </span>
         {selected && (
           <span className="flex items-center gap-0.5 rounded-md border border-zinc-700/80 bg-zinc-900/90 p-0.5 shadow-sm backdrop-blur" data-frame-ui>
+            <button
+              onClick={toggleCollapse}
+              className="rounded p-1 text-zinc-400 transition hover:bg-zinc-800 hover:text-sky-300"
+              title="折叠分组（收起为卡片）"
+            >
+              <ChevronsLeft className="h-3 w-3" />
+            </button>
             <button
               onClick={(e) => {
                 e.stopPropagation()

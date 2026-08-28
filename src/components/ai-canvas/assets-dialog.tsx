@@ -216,7 +216,13 @@ export function AssetsDialog() {
       })
       const j = await res.json()
       if (!res.ok) throw new Error(j.error || '重命名失败')
-      showToast('success', `已重命名为「${j.name}」`)
+      const refs = Number(j.updatedRefs ?? 0)
+      showToast(
+        'success',
+        refs > 0
+          ? `已重命名为「${j.name}」，同步更新画布引用 ${refs} 处`
+          : `已重命名为「${j.name}」`,
+      )
       await refresh()
     } catch (e) {
       showToast('error', e instanceof Error ? e.message : '重命名失败')
