@@ -24,6 +24,9 @@ import {
   UploadCloud,
   Download,
   CircleDashed,
+  RotateCcw,
+  AudioLines,
+  Volume2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -48,6 +51,8 @@ const ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   Film,
   Image: ImageIcon,
   MonitorPlay,
+  AudioLines,
+  Volume2,
 }
 
 /* --------------------------------- 端口行 --------------------------------- */
@@ -130,6 +135,33 @@ function OutputVideo({ url }: { url?: string }) {
       >
         <Download className="h-3 w-3" />
       </a>
+    </div>
+  )
+}
+
+function OutputAudio({ url, compact }: { url?: string; compact?: boolean }) {
+  if (!url) return null
+  return (
+    <div
+      nodrag=""
+      className={cn(
+        'relative rounded-lg border border-rose-500/25 bg-gradient-to-br from-rose-500/10 to-fuchsia-500/5 p-2',
+        compact && 'p-1.5',
+      )}
+    >
+      <div className="mb-1 flex items-center gap-1.5 px-0.5">
+        <Volume2 className="h-3 w-3 text-rose-300" />
+        <span className="text-[9px] text-rose-200/70">配音音频 · WAV</span>
+        <a
+          href={url}
+          download
+          className="ml-auto rounded p-0.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-rose-300"
+          title="下载音频"
+        >
+          <Download className="h-3 w-3" />
+        </a>
+      </div>
+      <audio src={url} controls className="h-8 w-full" />
     </div>
   )
 }
@@ -278,9 +310,18 @@ function NodeBody({
     )
   }
 
-  /* 图片/视频预览节点 */
-  if (type === 'imagePreview' || type === 'videoPreview') {
-    const kind = type === 'imagePreview' ? 'image' : 'video'
+  /* 图片/视频/音频预览节点 */
+  if (
+    type === 'imagePreview' ||
+    type === 'videoPreview' ||
+    type === 'audioPreview'
+  ) {
+    const kind =
+      type === 'imagePreview'
+        ? 'image'
+        : type === 'videoPreview'
+          ? 'video'
+          : 'audio'
     const input: NodeOutput | undefined = resolvedInputs[kind]
     return (
       <div className="space-y-2">
@@ -289,17 +330,23 @@ function NodeBody({
             <a href={input.url} target="_blank" rel="noreferrer" nodrag="">
               <OutputImage url={input.url} className="max-h-52" />
             </a>
-          ) : (
+          ) : kind === 'video' ? (
             <OutputVideo url={input.url} />
+          ) : (
+            <OutputAudio url={input.url} />
           )
         ) : (
           <div className="flex flex-col items-center gap-1.5 rounded-lg border border-dashed border-zinc-800 py-8">
             {kind === 'image' ? (
               <ImageIcon className="h-5 w-5 text-zinc-700" />
-            ) : (
+            ) : kind === 'video' ? (
               <MonitorPlay className="h-5 w-5 text-zinc-700" />
+            ) : (
+              <Volume2 className="h-5 w-5 text-zinc-700" />
             )}
-            <span className="text-[10px] text-zinc-600">连接上游后自动展示{kind === 'image' ? '图像' : '视频'}</span>
+            <span className="text-[10px] text-zinc-600">
+              连接上游后自动展示{kind === 'image' ? '图像' : kind === 'video' ? '视频' : '音频'}
+            </span>
           </div>
         )}
       </div>
@@ -307,17 +354,14 @@ function NodeBody({
   }
 
   /* 生成类节点 */
-  const showPromptField = spec!.params.some((p) => p.key === 'prompt')
   return (
     <div className="space-y-2">
-      {showPromptField && (
-        <ParamControl
-          field={spec!.params.find((p) => p.key === 'prompt')!}
-          value={params.prompt ?? ''}
-          onChange={setParam('prompt')}
-          disabled={disabled}
-        />
-      )}
+      {/* 通用渲染所有文本类参数（prompt / fallbackText / …） */}
+      {spec!.params
+        .filter((p) => p.type === 'textarea' || p.type === 'text')
+        .map((f) => (
+          <ParamControl key={f.key} field={f} value={params[f.key]} onChange={setParam(f.key)} disabled={disabled} />
+        ))}
       {spec!.params
         .filter((p) => p.type === 'select' || p.type === 'switch' || p.type === 'slider')
         .map((f) => (
@@ -369,6 +413,25 @@ function NodeBody({
             <div className="flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-zinc-800 py-5">
               <Film className="h-4 w-4 text-zinc-700" />
               <span className="text-[10px] text-zinc-600">尚未生成视频</span>
+            </div>
+          )}
+        </>
+      )}
+
+      {type === 'tts' && (
+        <>
+          {running ? (
+            <RunningPlaceholder label="语音合成中" progress={data.progress ?? 0} stage={data.stage} />
+          ) : outputs.audio?.url ? (
+            <OutputAudio url={outputs.audio.url} compact />
+          ) : data.runState === 'failed' ? (
+            <div className="rounded-lg border border-rose-500/30 bg-rose-500/5 p-2 text-[10px] text-rose-300">
+              {data.error || '合成失败'}
+            </div>
+          ) : (
+            <div className="flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-zinc-800 py-4">
+              <AudioLines className="h-4 w-4 text-zinc-700" />
+              <span className="text-[10px] text-zinc-600">尚未合成配音</span>
             </div>
           )}
         </>
@@ -499,10 +562,10 @@ export const GraphNode = memo(function GraphNode({ id, type, data, selected }: N
             <button
               nodrag=""
               className="rounded-md p-1 text-zinc-500 transition hover:bg-zinc-700/50 hover:text-amber-300"
-              title="仅运行此节点"
+              title={runState === 'failed' ? '重试此节点' : '仅运行此节点'}
               onClick={() => void runNode(id)}
             >
-              <Play className="h-3 w-3" />
+              {runState === 'failed' ? <RotateCcw className="h-3 w-3" /> : <Play className="h-3 w-3" />}
             </button>
           )}
           {runState === 'success' && <Check className="h-3.5 w-3.5 text-emerald-400" />}

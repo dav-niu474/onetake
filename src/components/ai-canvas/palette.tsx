@@ -14,6 +14,8 @@ import {
   Film,
   Image as ImageIcon,
   MonitorPlay,
+  AudioLines,
+  Volume2,
   ChevronDown,
   GripVertical,
 } from 'lucide-react'
@@ -37,6 +39,8 @@ const ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   Film,
   Image: ImageIcon,
   MonitorPlay,
+  AudioLines,
+  Volume2,
 }
 
 export function Palette() {

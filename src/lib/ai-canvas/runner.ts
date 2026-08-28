@@ -61,6 +61,50 @@ type ProgressFn = (stage: string, progress: number) => void
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
+/** 将 16bit PCM 裸流包装为可播放的 WAV 文件 */
+function pcmToWav(
+  pcm: Buffer,
+  sampleRate = 24000,
+  channels = 1,
+  bitsPerSample = 16,
+): Buffer {
+  const header = Buffer.alloc(44)
+  const byteRate = (sampleRate * channels * bitsPerSample) / 8
+  const blockAlign = (channels * bitsPerSample) / 8
+  header.write('RIFF', 0)
+  header.writeUInt32LE(36 + pcm.length, 4)
+  header.write('WAVE', 8)
+  header.write('fmt ', 12)
+  header.writeUInt32LE(16, 16)
+  header.writeUInt16LE(1, 20) // PCM
+  header.writeUInt16LE(channels, 22)
+  header.writeUInt32LE(sampleRate, 24)
+  header.writeUInt32LE(byteRate, 28)
+  header.writeUInt16LE(blockAlign, 32)
+  header.writeUInt16LE(bitsPerSample, 34)
+  header.write('data', 36)
+  header.writeUInt32LE(pcm.length, 40)
+  return Buffer.concat([header, pcm])
+}
+
+function num(params: Record<string, unknown>, key: string): number | undefined {
+  const v = params[key]
+  if (typeof v === 'number' && Number.isFinite(v)) return v
+  if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) {
+    return Number(v)
+  }
+  return undefined
+}
+
+async function saveBuffer(buf: Buffer, ext: string): Promise<string> {
+  await ensureDirs()
+  const file = `aud_${Date.now().toString(36)}_${Math.random()
+    .toString(36)
+    .slice(2, 8)}.${ext}`
+  await fs.writeFile(path.join(GEN_DIR, file), buf)
+  return `/generated/${file}`
+}
+
 function str(params: Record<string, unknown>, key: string): string {
   const v = params[key]
   return typeof v === 'string' ? v.trim() : ''
@@ -271,6 +315,44 @@ async function runImageToVideo(
   }
 }
 
+/* --------------------------------- 语音合成 --------------------------------- */
+
+async function runTTS(
+  io: ExecIO,
+  onProgress: ProgressFn,
+): Promise<Record<string, { kind: string; url?: string; text?: string }>> {
+  const text =
+    str(io.params, 'fallbackText') || io.inputs.text?.text || ''
+  if (!text) throw new Error('缺少文案：请连接提示词节点或在节点内填写')
+  const voiceRaw = str(io.params, 'voice')
+  const voice = voiceRaw && voiceRaw !== 'default-voice' ? voiceRaw : undefined
+  const speed = num(io.params, 'speed')
+  onProgress('正在合成语音…', 30)
+  const zai = await ZAI.create()
+  const res = await zai.audio.tts.create({
+    input: text,
+    ...(voice ? { voice } : {}),
+    ...(speed ? { speed } : {}),
+  })
+  onProgress('正在封装音频…', 80)
+  const arrayBuffer = await res.arrayBuffer()
+  const raw = Buffer.from(arrayBuffer)
+  if (raw.length === 0) throw new Error('语音合成结果为空')
+  // API 返回 PCM 裸流（24kHz 16bit mono），包装为 WAV
+  const isWav = raw.length > 44 && raw.slice(0, 4).toString() === 'RIFF'
+  const url = await saveBuffer(
+    isWav ? raw : pcmToWav(raw),
+    'wav',
+  )
+  return {
+    audio: {
+      kind: 'audio',
+      url,
+      meta: { voice: voice ?? 'default', speed: speed ?? 1 },
+    },
+  }
+}
+
 /* --------------------------------- 统一入口 --------------------------------- */
 
 export async function executeNode(
@@ -289,6 +371,8 @@ export async function executeNode(
       return runTextToVideo(io, onProgress)
     case 'imageToVideo':
       return runImageToVideo(io, onProgress)
+    case 'tts':
+      return runTTS(io, onProgress)
     default:
       throw new Error(`节点类型 ${nodeType} 不可执行`)
   }

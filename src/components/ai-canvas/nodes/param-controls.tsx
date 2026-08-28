@@ -5,6 +5,7 @@
  */
 import { Textarea } from '@/components/ui/textarea'
 import { Switch } from '@/components/ui/switch'
+import { Slider } from '@/components/ui/slider'
 import {
   Select,
   SelectContent,
@@ -92,6 +93,29 @@ export function ParamControl({ field, value, onChange, disabled }: Props) {
           />
         </div>
       )
+    case 'slider': {
+      const numValue = typeof value === 'number' ? value : Number(field.defaultValue)
+      return (
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-medium text-zinc-400">{field.label}</span>
+            <span className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[9px] text-rose-300">
+              {numValue}
+              {field.unit ?? ''}
+            </span>
+          </div>
+          <Slider
+            value={[numValue]}
+            min={field.min ?? 0}
+            max={field.max ?? 100}
+            step={field.step ?? 1}
+            onValueChange={(vals) => onChange(vals[0])}
+            disabled={disabled}
+            className="cursor-pointer [&_[role=slider]]:h-3 [&_[role=slider]]:w-3 [&_[role=slider]]:border-rose-400/70 [&_[role=slider]]:bg-zinc-200 [&_[role=range]]:bg-rose-500/70"
+          />
+        </div>
+      )
+    }
     default:
       return null
   }

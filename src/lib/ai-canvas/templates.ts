@@ -132,4 +132,59 @@ export const TEMPLATES: WorkflowTemplate[] = [
       edges: [edge('e1', 'text', 'e2', 'text'), edge('e2', 'text', 'e3', 'text')],
     }),
   },
+  {
+    id: 'voiceover',
+    name: '口播视频 · 配音一条龙',
+    description: '文案一键配音 + 画面生成，双轨并行创作',
+    tag: '自媒体',
+    gradient: 'from-rose-500/20 via-fuchsia-500/10 to-transparent',
+    build: () => ({
+      nodes: [
+        node('v1', 'prompt', 60, 120, {
+          text: '欢迎来到未来科技实验室。在这里，每一份创意都会被 AI 放大百倍。今天，让我们一起见证想象力的诞生。',
+        }),
+        node('v2', 'tts', 460, 60, { voice: 'tongtong', speed: 1 }),
+        node('v3', 'audioPreview', 860, 80),
+        node('v4', 'prompt', 60, 420, {
+          text: '未来感科技实验室内部，全息投影界面漂浮在空中，蓝紫色光线交织，镜头缓慢横移',
+        }),
+        node('v5', 'textToVideo', 460, 380, { quality: 'quality', withAudio: false }),
+        node('v6', 'videoPreview', 860, 400),
+      ],
+      edges: [
+        edge('v1', 'text', 'v2', 'text'),
+        edge('v2', 'audio', 'v3', 'audio'),
+        edge('v4', 'text', 'v5', 'text'),
+        edge('v5', 'video', 'v6', 'video'),
+      ],
+    }),
+  },
+  {
+    id: 'product-showcase',
+    name: '产品展示 · 一图变大片',
+    description: '上传产品图，AI 场景化重绘后生成展示视频',
+    tag: '电商',
+    gradient: 'from-orange-500/20 via-rose-500/10 to-transparent',
+    build: () => ({
+      nodes: [
+        node('p1', 'imageUpload', 40, 240),
+        node('p2', 'imageEdit', 440, 200, {
+          prompt: '将产品置于高级感展示台，柔和的摄影棚灯光，背景是渐变的暖色丝绸帷幕，商业广告质感',
+        }),
+        node('p3', 'prompt', 440, 460, {
+          text: '镜头围绕产品缓缓环绕一周，灯光从侧面扫过，呈现高级质感',
+        }),
+        node('p4', 'imageToVideo', 860, 220, { quality: 'quality' }),
+        node('p5', 'imagePreview', 860, 500),
+        node('p6', 'videoPreview', 1280, 240),
+      ],
+      edges: [
+        edge('p1', 'image', 'p2', 'image'),
+        edge('p2', 'image', 'p4', 'image'),
+        edge('p3', 'text', 'p4', 'text'),
+        edge('p4', 'video', 'p6', 'video'),
+        edge('p2', 'image', 'p5', 'image'),
+      ],
+    }),
+  },
 ]

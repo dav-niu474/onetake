@@ -134,3 +134,54 @@ export async function deleteWorkflow(id: string) {
     store.showToast('error', e instanceof Error ? e.message : '删除失败')
   }
 }
+
+/** 导出当前工作流为 JSON 文件 */
+export function exportWorkflowJson() {
+  const { workflow, showToast } = useCanvasStore.getState()
+  const graph = serializeGraph()
+  const payload = {
+    format: 'ai-canvas-workflow',
+    version: 1,
+    name: workflow.name,
+    exportedAt: new Date().toISOString(),
+    graph,
+  }
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {
+    type: 'application/json',
+  })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${workflow.name || '工作流'}.json`.replace(/\s+/g, '_')
+  a.click()
+  URL.revokeObjectURL(url)
+  showToast('success', '已导出工作流 JSON')
+}
+
+/** 从 JSON 文件导入工作流（作为新工作流载入画布） */
+export function importWorkflowJson(file: File) {
+  const store = useCanvasStore.getState()
+  const reader = new FileReader()
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(String(reader.result))
+      const graph = data.graph ?? data
+      if (!Array.isArray(graph?.nodes) || !Array.isArray(graph?.edges)) {
+        throw new Error('文件格式不正确：缺少 nodes/edges')
+      }
+      const name = typeof data.name === 'string' ? `${data.name} (导入)` : '导入的工作流'
+      const nodes = graph.nodes.map((n: Node<CanvasNodeData>) => ({
+        ...n,
+        selected: false,
+        data: { ...n.data, runState: 'idle' as const, progress: 0 },
+      }))
+      const edges = graph.edges.map((e: Edge) => ({ ...e, selected: false }))
+      store.loadGraph({ nodes, edges }, { id: null, name })
+      syncOutputsAfterLoad()
+      store.showToast('success', `已导入「${name}」`)
+    } catch (e) {
+      store.showToast('error', e instanceof Error ? e.message : '导入失败')
+    }
+  }
+  reader.readAsText(file)
+}

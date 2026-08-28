@@ -221,13 +221,37 @@ function CanvasInner() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const meta = e.ctrlKey || e.metaKey
+      const target = e.target as HTMLElement | null
+      const typing =
+        !!target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable)
       if (meta && e.key === 's') {
         e.preventDefault()
         void saveWorkflow()
+        return
       }
       if (meta && e.key === 'Enter') {
         e.preventDefault()
         void runWorkflow()
+        return
+      }
+      if (typing) return
+      const store = useCanvasStore.getState()
+      if (meta && !e.shiftKey && e.key.toLowerCase() === 'z') {
+        e.preventDefault()
+        store.undo()
+      } else if (
+        ((meta && e.shiftKey && e.key.toLowerCase() === 'z') ||
+          (meta && e.key.toLowerCase() === 'y'))
+      ) {
+        e.preventDefault()
+        store.redo()
+      } else if (meta && e.key.toLowerCase() === 'c') {
+        store.copySelection()
+      } else if (meta && e.key.toLowerCase() === 'v') {
+        store.pasteClipboard()
       }
       if (e.key === 'Escape') setMenu(null)
     }
