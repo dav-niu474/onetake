@@ -65,6 +65,7 @@ import { LibraryDialog } from './library-dialog'
 import { TemplatesDialog } from './templates-dialog'
 import { AssetsDialog } from './assets-dialog'
 import { HistoryDialog } from './history-dialog'
+import { SettingsDialog } from './settings-dialog'
 import { GroupLayer } from './group-layer'
 import { AlignmentGuides } from './alignment-guides'
 
@@ -753,6 +754,7 @@ function CanvasInner() {
       <TemplatesDialog />
       <AssetsDialog />
       <HistoryDialog />
+      <SettingsDialog />
     </div>
   )
 }

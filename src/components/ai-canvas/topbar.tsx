@@ -22,6 +22,7 @@ import {
   FileUp,
   PackageOpen,
   History,
+  Settings,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -50,6 +51,7 @@ export function TopBar() {
   const setTemplatesOpen = useCanvasStore((s) => s.setTemplatesOpen)
   const setAssetsOpen = useCanvasStore((s) => s.setAssetsOpen)
   const setHistoryOpen = useCanvasStore((s) => s.setHistoryOpen)
+  const setSettingsOpen = useCanvasStore((s) => s.setSettingsOpen)
   const importInputRef = useRef<HTMLInputElement>(null)
 
   return (
@@ -147,6 +149,17 @@ export function TopBar() {
           <span className="hidden md:inline">素材库</span>
         </Button>
         <NewWorkflowButton />
+
+        {/* 模型服务设置 */}
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => setSettingsOpen(true)}
+          className="h-8 w-8 rounded-md p-0 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+          title="模型服务配置"
+        >
+          <Settings className="h-4 w-4" />
+        </Button>
 
         {/* 更多操作 */}
         <DropdownMenu>

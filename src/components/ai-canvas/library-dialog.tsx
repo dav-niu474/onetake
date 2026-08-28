@@ -1,9 +1,9 @@
 'use client'
 
 /**
- * 作品库对话框：已保存工作流列表
+ * 作品库对话框：已保存工作流列表（支持按名称搜索）
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Dialog,
   DialogContent,
@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
   FolderOpen,
@@ -19,6 +20,8 @@ import {
   Clock3,
   Workflow as WorkflowIcon,
   PenLine,
+  Search,
+  SearchX,
 } from 'lucide-react'
 import { useCanvasStore } from '@/lib/ai-canvas/store'
 import { deleteWorkflow, openWorkflow } from '@/lib/ai-canvas/persistence'
@@ -36,6 +39,7 @@ export function LibraryDialog() {
   const setOpen = useCanvasStore((s) => s.setLibraryOpen)
   const [items, setItems] = useState<WorkflowItem[]>([])
   const [loading, setLoading] = useState(false)
+  const [query, setQuery] = useState('')
 
   const refresh = async () => {
     setLoading(true)
@@ -51,8 +55,18 @@ export function LibraryDialog() {
   }
 
   useEffect(() => {
-    if (open) void refresh()
+    if (open) {
+      setQuery('') // 每次打开重置搜索，避免残留过滤态
+      void refresh()
+    }
   }, [open])
+
+  /* 按名称实时过滤（大小写不敏感） */
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return items
+    return items.filter((i) => i.name.toLowerCase().includes(q))
+  }, [items, query])
 
   const fmt = (iso: string) => {
     try {
@@ -71,11 +85,22 @@ export function LibraryDialog() {
             作品库
           </DialogTitle>
           <DialogDescription className="text-zinc-500">
-            打开已保存的工作流继续创作
+            打开已保存的工作流继续创作{items.length > 0 && `（共 ${items.length} 个作品）`}
           </DialogDescription>
         </DialogHeader>
 
-        <ScrollArea className="max-h-[380px] pr-2">
+        {/* 名称搜索 */}
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-600" />
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="搜索作品名称…"
+            className="h-8 rounded-lg border-zinc-800 bg-zinc-900/60 pl-8 text-[12px] text-zinc-200 placeholder:text-zinc-600 focus-visible:ring-1 focus-visible:ring-amber-500/50"
+          />
+        </div>
+
+        <ScrollArea className="max-h-[340px] pr-2">
           {loading ? (
             <div className="space-y-2">
               {[1, 2, 3].map((i) => (
@@ -87,9 +112,20 @@ export function LibraryDialog() {
               <WorkflowIcon className="h-8 w-8" />
               <p className="text-xs">还没有保存的作品，去画布创作吧</p>
             </div>
+          ) : filtered.length === 0 ? (
+            <div className="flex flex-col items-center gap-2 py-12 text-zinc-600">
+              <SearchX className="h-8 w-8" />
+              <p className="text-xs">没有匹配「{query.trim()}」的作品</p>
+              <button
+                onClick={() => setQuery('')}
+                className="text-[11px] text-amber-300/90 transition hover:text-amber-200"
+              >
+                清除搜索
+              </button>
+            </div>
           ) : (
             <div className="space-y-2">
-              {items.map((item) => {
+              {filtered.map((item) => {
                 const isCurrent = useCanvasStore.getState().workflow.id === item.id
                 return (
                   <div

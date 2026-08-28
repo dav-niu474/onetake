@@ -1,9 +1,9 @@
 'use client'
 
 /**
- * 模板库对话框：一键载入预置工作流
+ * 模板库对话框：一键载入预置工作流（支持按分类过滤）
  */
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import {
   Dialog,
   DialogContent,
@@ -13,11 +13,17 @@ import {
 } from '@/components/ui/dialog'
 import { Badge } from '@/components/ui/badge'
 import { LayoutTemplate, ArrowRight, ChevronRight } from 'lucide-react'
+import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/lib/ai-canvas/store'
 import { TEMPLATES } from '@/lib/ai-canvas/templates'
 
 /** 每张卡片最多展示的节点链 chips，超出的折叠为 +N */
 const MAX_CHIPS = 6
+
+interface TemplatePreview {
+  total: number
+  labels: string[]
+}
 
 export function TemplatesDialog() {
   const open = useCanvasStore((s) => s.templatesOpen)
@@ -25,19 +31,36 @@ export function TemplatesDialog() {
   const loadGraph = useCanvasStore((s) => s.loadGraph)
   const showToast = useCanvasStore((s) => s.showToast)
 
-  /* 预览数据仅在打开时计算一次，避免每次渲染重复 build() */
-  const previews = useMemo(
-    () =>
-      TEMPLATES.map((t) => {
-        const nodes = t.build().nodes
-        return {
-          id: t.id,
-          total: nodes.length,
-          labels: nodes.slice(0, MAX_CHIPS).map((n) => String(n.data.label ?? '')),
-        }
-      }),
+  /* 当前选中的分类（「全部」= 不过滤） */
+  const [cat, setCat] = useState('全部')
+
+  /* 预览数据仅在打开时计算一次，避免每次渲染重复 build()（按模板 id 索引，过滤后仍可对齐） */
+  const previews = useMemo(() => {
+    const map = new Map<string, TemplatePreview>()
+    TEMPLATES.forEach((t) => {
+      const nodes = t.build().nodes
+      map.set(t.id, {
+        total: nodes.length,
+        labels: nodes.slice(0, MAX_CHIPS).map((n) => String(n.data.label ?? '')),
+      })
+    })
+    return map
     // 模板为模块常量，仅需在挂载后计算
-    [],
+  }, [])
+
+  /* 分类 chips：全部 + 各分类（按模板声明顺序去重），带计数 */
+  const categories = useMemo(() => {
+    const counts = new Map<string, number>()
+    TEMPLATES.forEach((t) => counts.set(t.category, (counts.get(t.category) ?? 0) + 1))
+    return [
+      { key: '全部', count: TEMPLATES.length },
+      ...Array.from(counts.entries()).map(([key, count]) => ({ key, count })),
+    ]
+  }, [])
+
+  const visible = useMemo(
+    () => (cat === '全部' ? TEMPLATES : TEMPLATES.filter((t) => t.category === cat)),
+    [cat],
   )
 
   const apply = (id: string) => {
@@ -58,13 +81,43 @@ export function TemplatesDialog() {
             工作流模板
           </DialogTitle>
           <DialogDescription className="text-zinc-500">
-            从模板快速开始，载入后可自由修改
+            从模板快速开始，按场景分类浏览，载入后可自由修改
           </DialogDescription>
         </DialogHeader>
 
-        <div className="grid max-h-[62vh] grid-cols-1 gap-3 overflow-y-auto pr-1 scrollbar-thin sm:grid-cols-2">
-          {TEMPLATES.map((tpl, idx) => {
-            const preview = previews[idx]
+        {/* 分类过滤 chips */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          {categories.map((c) => {
+            const active = cat === c.key
+            return (
+              <button
+                key={c.key}
+                onClick={() => setCat(c.key)}
+                className={cn(
+                  'flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[10px] transition',
+                  active
+                    ? 'border-amber-400/60 bg-amber-500/15 text-amber-200'
+                    : 'border-zinc-800 bg-zinc-900/60 text-zinc-500 hover:border-zinc-700 hover:text-zinc-300',
+                )}
+              >
+                {c.key}
+                <span
+                  className={cn(
+                    'font-mono text-[9px]',
+                    active ? 'text-amber-300/80' : 'text-zinc-600',
+                  )}
+                >
+                  {c.count}
+                </span>
+              </button>
+            )
+          })}
+        </div>
+
+        <div className="grid max-h-[56vh] grid-cols-1 gap-3 overflow-y-auto pr-1 scrollbar-thin sm:grid-cols-2">
+          {visible.map((tpl) => {
+            const preview = previews.get(tpl.id)
+            if (!preview) return null
             const hidden = preview.total - preview.labels.length
             return (
               <button
@@ -77,7 +130,9 @@ export function TemplatesDialog() {
                     {tpl.tag}
                   </Badge>
                   <span className="flex items-center gap-2">
-                    <span className="font-mono text-[9px] text-zinc-600">{preview.total} 节点</span>
+                    <span className="font-mono text-[9px] text-zinc-600">
+                      {tpl.category} · {preview.total} 节点
+                    </span>
                     <ArrowRight className="h-4 w-4 text-zinc-600 transition group-hover:translate-x-0.5 group-hover:text-amber-300" />
                   </span>
                 </div>

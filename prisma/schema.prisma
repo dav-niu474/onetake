@@ -44,3 +44,17 @@ model Execution {
   updatedAt  DateTime  @updatedAt
   workflow   Workflow? @relation(fields: [workflowId], references: [id], onDelete: SetNull)
 }
+
+// 模型供应商配置（按能力维度路由：llm | image | tts | video）
+// providerKind: builtin = 内置 z-ai-web-dev-sdk；openai_compatible = OpenAI 兼容协议自定义供应商
+model ProviderSetting {
+  id           String   @id @default(cuid())
+  capability   String   @unique // llm | image | tts | video
+  providerKind String   @default("builtin") // builtin | openai_compatible
+  baseUrl      String?
+  apiKey       String?
+  model        String?
+  voice        String? // tts 专用：音色
+  enabled      Boolean  @default(true)
+  updatedAt    DateTime @updatedAt
+}

@@ -94,6 +94,7 @@ export interface CanvasStore {
   templatesOpen: boolean
   assetsOpen: boolean
   historyOpen: boolean
+  settingsOpen: boolean
   snapToGrid: boolean
   toast: { type: 'success' | 'error' | 'info'; message: string } | null
   /* 拖拽对齐参考线（瞬态，不入撤销栈/持久化）：flow 坐标下的对齐线位置 */
@@ -163,6 +164,7 @@ export interface CanvasStore {
   setTemplatesOpen: (v: boolean) => void
   setAssetsOpen: (v: boolean) => void
   setHistoryOpen: (v: boolean) => void
+  setSettingsOpen: (v: boolean) => void
   setSnapToGrid: (v: boolean) => void
   setGuides: (g: { vertical: number[]; horizontal: number[] } | null) => void
   setGroupDragHint: (h: { groupId: string; action: 'add' | 'remove' } | null) => void
@@ -297,6 +299,7 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
   templatesOpen: false,
   assetsOpen: false,
   historyOpen: false,
+  settingsOpen: false,
   snapToGrid: false,
   toast: null,
   guides: { vertical: [], horizontal: [] },
@@ -879,6 +882,7 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
   setTemplatesOpen: (v) => set({ templatesOpen: v }),
   setAssetsOpen: (v) => set({ assetsOpen: v }),
   setHistoryOpen: (v) => set({ historyOpen: v }),
+  setSettingsOpen: (v) => set({ settingsOpen: v }),
   setSnapToGrid: (v) => set({ snapToGrid: v }),
   setGuides: (g) =>
     set({ guides: g ?? { vertical: [], horizontal: [] } }),

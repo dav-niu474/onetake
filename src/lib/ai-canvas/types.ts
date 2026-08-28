@@ -220,6 +220,15 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
     outputs: [{ id: 'text', label: '文本', kind: 'text' }],
     params: [
       {
+        key: 'fallbackText',
+        label: '本节点提示词（无上游时生效）',
+        type: 'textarea',
+        defaultValue: '',
+        placeholder: '留空则使用上游提示词输入',
+        hint: '已连接上游提示词时将忽略本项；断开上游可作为独立扩写文案',
+        group: '内容',
+      },
+      {
         key: 'style',
         label: '目标风格',
         type: 'select',
