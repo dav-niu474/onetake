@@ -753,3 +753,43 @@ Task: 状态评估 + agent-browser QA + bug 修复 + 功能扩展
 4. 历史对话框按 nodeId 分组折叠同节点多次记录
 5. MiniMap 点击节点定位 + 悬停联动真实节点高亮（复用 .snap-hover-highlight 方案）
 6. 画布缩略图导出（PNG 快照分享）
+
+---
+
+## Task ID: 12 — 仓库文档化：README + GitHub About/Topics
+Agent: main (Z.ai Code)
+Task: 添加仓库 README 说明与 GitHub About 描述
+
+### 项目当前状态描述/判断
+- 用户请求：为 GitHub 仓库 dav-niu474/agent-video-canvas 添加 README 与 About 描述
+- 项目代码基线稳定（Task 1-11 已交付），本轮为纯文档工作，无代码改动
+
+### 已完成内容
+1. **README.md（全新）**
+   - 中英双语开头 + 功能徽章定位
+   - 真实运行截图（docs/screenshot-canvas.png，agent-browser 从 3000 端口实拍：故事分镜模板 + 分组 + minimap 全景）
+   - 核心特性 8 大项（节点编排/真实 AI 管线/ffmpeg 媒体引擎/并行执行/画布体验/持久化/素材库/运行历史）
+   - 14 种节点表格（输入 3 / AI 生成 6 / 编辑处理 2 / 输出 3，均与 types.ts 注册表核对）
+   - 7 个内置模板表、快捷键表、快速开始（bun + db:push + dev + ffmpeg 依赖说明）
+   - Mermaid 架构图 + 技术栈表 + 目录结构树 + 10 个 API 端点表
+   - 工程健壮性设计专节（任务恢复/僵尸任务治理/限流防御/竞态防护/原子撤销/安全校验）
+   - Roadmap（源自 Task 9-11 下一轮建议）
+2. **GitHub About（REST API 实证设置成功）**
+   - description：🎬 节点式 AI 视频创作画布平台（中英双语一句话）
+   - homepage：指向 README 锚点
+   - topics ×12：ai-video / react-flow / node-editor / nextjs / comfyui / workflow-automation / text-to-video / ffmpeg / tts / canvas / zustand / shadcn-ui
+3. **推送**：commit 0d1ede5（README.md + docs/screenshot-canvas.png）已推送 origin/main
+
+### 验证结果
+- GitHub API 回读确认 description/homepage/topics 全部生效
+- git push 成功（e34575e..0d1ede5 main -> main）
+- 截图经 Read 工具人工查验：暗色画布、节点参数、视频预览、分组、状态栏清晰可见
+
+### 未解决问题 / 风险
+- README 中 screenshot 为静态截图，后续大改 UI 时需更新（可考虑 cron 巡检时低频刷新）
+- token 仍配置于 .git/config 远程 URL（沙箱内可接受，建议用户后续轮换）
+
+### 下一轮建议（优先级从高到低）
+1. 沿用 Task 11 建议：tv3 补跑（配额释放后）→ 三幕成片闭环
+2. 「运行所选」完整链路实测；多选拖拽与对齐参考线协调
+3. 历史对话框按 nodeId 分组折叠；MiniMap 点击定位联动
