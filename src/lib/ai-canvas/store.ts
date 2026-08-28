@@ -71,6 +71,8 @@ export interface CanvasStore {
   paletteOpen: boolean
   libraryOpen: boolean
   templatesOpen: boolean
+  assetsOpen: boolean
+  historyOpen: boolean
   snapToGrid: boolean
   toast: { type: 'success' | 'error' | 'info'; message: string } | null
 
@@ -117,6 +119,8 @@ export interface CanvasStore {
   setPaletteOpen: (v: boolean) => void
   setLibraryOpen: (v: boolean) => void
   setTemplatesOpen: (v: boolean) => void
+  setAssetsOpen: (v: boolean) => void
+  setHistoryOpen: (v: boolean) => void
   setSnapToGrid: (v: boolean) => void
   showToast: (type: 'success' | 'error' | 'info', message: string) => void
   clearToast: () => void
@@ -146,6 +150,8 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
   paletteOpen: true,
   libraryOpen: false,
   templatesOpen: false,
+  assetsOpen: false,
+  historyOpen: false,
   snapToGrid: false,
   toast: null,
 
@@ -321,6 +327,7 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
     const ok = isConnectionValid(
       { type: src.type as string, handleId: conn.sourceHandle },
       { type: tgt.type as string, handleId: conn.targetHandle },
+      src.data,
     )
     if (!ok) {
       get().showToast('error', '端口类型不匹配，无法连接')
@@ -405,17 +412,23 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
 
   updateNodeParam: (id, key, value) =>
     set((s) => ({
-      nodes: s.nodes.map((n) =>
-        n.id === id
-          ? {
-              ...n,
-              data: {
-                ...n.data,
-                params: { ...n.data.params, [key]: value },
-              },
-            }
-          : n,
-      ),
+      nodes: s.nodes.map((n) => {
+        if (n.id !== id) return n
+        const params = { ...n.data.params, [key]: value }
+        // 素材引用节点切换类型时清空输出（旧输出类型已不匹配）
+        const assetReset: Partial<CanvasNodeData> =
+          n.type === 'asset' && key === 'assetKind'
+            ? { outputs: {}, runState: 'idle' as RunState, stage: undefined, progress: 0 }
+            : {}
+        return {
+          ...n,
+          data: {
+            ...n.data,
+            params,
+            ...assetReset,
+          },
+        }
+      }),
       dirty: true,
     })),
 
@@ -490,6 +503,8 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
   setPaletteOpen: (v) => set({ paletteOpen: v }),
   setLibraryOpen: (v) => set({ libraryOpen: v }),
   setTemplatesOpen: (v) => set({ templatesOpen: v }),
+  setAssetsOpen: (v) => set({ assetsOpen: v }),
+  setHistoryOpen: (v) => set({ historyOpen: v }),
   setSnapToGrid: (v) => set({ snapToGrid: v }),
   showToast: (type, message) => set({ toast: { type, message } }),
   clearToast: () => set({ toast: null }),

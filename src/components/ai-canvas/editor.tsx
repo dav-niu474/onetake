@@ -46,6 +46,8 @@ import { Palette } from './palette'
 import { Inspector } from './inspector'
 import { LibraryDialog } from './library-dialog'
 import { TemplatesDialog } from './templates-dialog'
+import { AssetsDialog } from './assets-dialog'
+import { HistoryDialog } from './history-dialog'
 
 const nodeTypes: NodeTypes = Object.fromEntries(
   NODE_TYPE_LIST.map((s) => [s.type, GraphNode]),
@@ -203,6 +205,36 @@ function CanvasInner() {
     return () => window.removeEventListener('ai-canvas:add-node', handler)
   }, [screenToFlowPosition, addNode])
 
+  /* ---------- 素材库：一键插入素材引用节点 ---------- */
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const d = (e as CustomEvent<{ kind: string; url: string; name: string }>).detail
+      if (!d?.url || !NODE_SPECS.asset) return
+      const rect = wrapper.current?.getBoundingClientRect()
+      const cx = rect ? rect.left + rect.width / 2 : window.innerWidth / 2
+      const cy = rect ? rect.top + rect.height / 2 : window.innerHeight / 2
+      const position = screenToFlowPosition({ x: cx, y: cy })
+      position.x += (Math.random() - 0.5) * 100
+      position.y += (Math.random() - 0.5) * 80
+      const store = useCanvasStore.getState()
+      const id = store.addNode('asset', position)
+      if (!id) return
+      store.updateNodeParam(id, 'assetKind', d.kind)
+      store.updateNodeParam(id, 'assetUrl', d.url)
+      store.updateNodeParam(id, 'assetName', d.name)
+      store.updateNodeData(id, { label: d.name || '素材引用' })
+      store.setNodeOutput(id, d.kind, {
+        kind: d.kind as 'image' | 'video' | 'audio',
+        url: d.url,
+        meta: { source: 'asset-library' },
+      })
+      store.setNodeRunState(id, 'success', { stage: '素材就绪', progress: 100 })
+      store.showToast('success', `已插入素材「${d.name}」`)
+    }
+    window.addEventListener('ai-canvas:insert-asset', handler)
+    return () => window.removeEventListener('ai-canvas:insert-asset', handler)
+  }, [screenToFlowPosition])
+
   /* ---------- 首次进入：自动载入最近作品 ---------- */
   useEffect(() => {
     void (async () => {
@@ -307,6 +339,7 @@ function CanvasInner() {
       return isConnectionValid(
         { type: src.type as string, handleId: conn.sourceHandle },
         { type: tgt.type as string, handleId: conn.targetHandle },
+        src.data,
       )
     },
     [],
@@ -503,6 +536,8 @@ function CanvasInner() {
       <StatusBar />
       <LibraryDialog />
       <TemplatesDialog />
+      <AssetsDialog />
+      <HistoryDialog />
     </div>
   )
 }

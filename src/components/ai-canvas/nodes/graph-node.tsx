@@ -28,6 +28,8 @@ import {
   AudioLines,
   Volume2,
   Merge,
+  Layers,
+  PackageOpen,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -55,6 +57,8 @@ const ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   AudioLines,
   Volume2,
   Merge,
+  Layers,
+  PackageOpen,
 }
 
 /* --------------------------------- 端口行 --------------------------------- */
@@ -118,12 +122,13 @@ function OutputImage({ url, className }: { url?: string; className?: string }) {
   )
 }
 
-function OutputVideo({ url }: { url?: string }) {
+function OutputVideo({ url, poster }: { url?: string; poster?: string }) {
   if (!url) return null
   return (
     <div className="group/video relative">
       <video
         src={url}
+        poster={poster}
         controls
         playsInline
         className="w-full rounded-lg border border-zinc-700/60 bg-black"
@@ -312,6 +317,38 @@ function NodeBody({
     )
   }
 
+  /* 素材引用节点 */
+  if (type === 'asset') {
+    const kind = String(params.assetKind ?? 'image')
+    const url = String(params.assetUrl ?? '')
+    const name = String(params.assetName ?? '')
+    return (
+      <div className="space-y-2">
+        {url ? (
+          kind === 'image' ? (
+            <a href={url} target="_blank" rel="noreferrer" nodrag="">
+              <OutputImage url={url} className="max-h-40" />
+            </a>
+          ) : kind === 'video' ? (
+            <OutputVideo url={url} />
+          ) : (
+            <OutputAudio url={url} compact />
+          )
+        ) : (
+          <div className="flex flex-col items-center gap-1.5 rounded-lg border border-dashed border-zinc-800 py-6">
+            <PackageOpen className="h-5 w-5 text-zinc-700" />
+            <span className="text-[10px] text-zinc-600">从素材库插入素材</span>
+          </div>
+        )}
+        {name && (
+          <p className="truncate text-[9px] text-zinc-500" title={name}>
+            {name}
+          </p>
+        )}
+      </div>
+    )
+  }
+
   /* 图片/视频/音频预览节点 */
   if (
     type === 'imagePreview' ||
@@ -333,7 +370,10 @@ function NodeBody({
               <OutputImage url={input.url} className="max-h-52" />
             </a>
           ) : kind === 'video' ? (
-            <OutputVideo url={input.url} />
+            <OutputVideo
+              url={input.url}
+              poster={input.meta?.poster ? String(input.meta.poster) : undefined}
+            />
           ) : (
             <OutputAudio url={input.url} />
           )
@@ -401,12 +441,19 @@ function NodeBody({
         </>
       )}
 
-      {(type === 'textToVideo' || type === 'imageToVideo' || type === 'avMerge') && (
+      {(type === 'textToVideo' || type === 'imageToVideo' || type === 'avMerge' || type === 'concat') && (
         <>
           {running ? (
-            <RunningPlaceholder label="视频生成中" progress={data.progress ?? 0} stage={data.stage} />
+            <RunningPlaceholder
+              label={type === 'concat' ? '拼接中' : type === 'avMerge' ? '合成中' : '视频生成中'}
+              progress={data.progress ?? 0}
+              stage={data.stage}
+            />
           ) : outputs.video?.url ? (
-            <OutputVideo url={outputs.video.url} />
+            <OutputVideo
+              url={outputs.video.url}
+              poster={outputs.video.meta?.poster ? String(outputs.video.meta.poster) : undefined}
+            />
           ) : data.runState === 'failed' ? (
             <div className="rounded-lg border border-rose-500/30 bg-rose-500/5 p-2 text-[10px] text-rose-300">
               {data.error || '生成失败'}
@@ -415,7 +462,11 @@ function NodeBody({
             <div className="flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-zinc-800 py-5">
               <Film className="h-4 w-4 text-zinc-700" />
               <span className="text-[10px] text-zinc-600">
-                {type === 'avMerge' ? '尚未合成成片' : '尚未生成视频'}
+                {type === 'avMerge'
+                  ? '尚未合成成片'
+                  : type === 'concat'
+                    ? '连接视频片段后拼接'
+                    : '尚未生成视频'}
               </span>
             </div>
           )}
@@ -592,7 +643,10 @@ export const GraphNode = memo(function GraphNode({ id, type, data, selected }: N
           <PortRow key={inp.id} port={inp} kind="target" connected={connectedInputs.has(inp.id)} side="left" />
         ))}
         <NodeBody id={id} type={type ?? ''} data={data} disabled={runState === 'running'} />
-        {spec.outputs.map((out) => (
+        {(type === 'asset'
+          ? spec.outputs.filter((o) => o.id === String(data.params?.assetKind ?? 'image'))
+          : spec.outputs
+        ).map((out) => (
           <PortRow key={out.id} port={out} kind="source" connected={connectedOutputs.has(out.id)} side="right" />
         ))}
       </div>

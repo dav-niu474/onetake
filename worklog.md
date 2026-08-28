@@ -214,3 +214,62 @@ Task: QA 检查 + bug 修复 + 功能扩展
 4. Inspector 虚拟化/按 id 订阅优化；节点对齐参考线（对齐吸附之外的智能参考线）
 5. 工作流执行历史对话框（Execution 表已有数据，做 UI 展示耗时/状态/产物）
 6. 移动端 Inspector 以底部抽屉形式开放
+
+---
+
+## Task ID: 4 — 视频拼接 / 素材库 / 运行历史 / 视频海报
+Agent: cron-webDevReview（第 4 轮）
+Task: QA 检查 + bug 修复 + 功能扩展
+
+### 项目当前状态描述/判断
+- 上轮核心链路稳定，agent-browser QA 未发现回归：页面渲染、工作流自动恢复（含输出回填）、模板/作品库对话框、添加节点、撤销重做（8→9→8→9）、TTS 真实执行均正常
+- Lint 0 错误 0 警告；控制台无新增报错（仅开发期 React Flow nodeTypes HMR 警告与 Next DevTools hydration 提示）
+- 节点体系从 11 种扩展到 **13 种**（新增 concat / asset）
+
+### 本轮修复的 bug（重要）
+1. **concat 叠化转场 ffmpeg 失败（CFR 校验）**
+   - 现象：xfade 报 "The inputs needs to be a constant frame rate; current rate of 1/0 is invalid"，任务失败
+   - 根因：归一化链中 `setpts=PTS-STARTPTS` 置于 `fps=30` 之后，破坏了帧率元数据（变为 1/0）
+   - 修复：调整链序为 `…,setsar=1,setpts=PTS-STARTPTS,fps=30,format=yuv420p`（setpts 在前、fps 收尾）
+   - 实证：修复前 API 复现失败（code 234）；修复后同样输入成功出片
+
+### 本轮新增功能（全部实测验证）
+1. **视频拼接节点（concat）— 打通"分镜 → 成片"创作链**
+   - 4 个视频输入端口（段 1/段 2 必需，段 3/段 4 可选，按端口序拼接）
+   - 参数：转场效果（硬切/叠化/擦除/上滑/圆形展开，xfade 实现及 clamp 防转场超过最短片段）、转场时长滑杆（0.2-2s）、画幅统一（以首段为准 · 留黑边 pad / 裁剪填满 crop）
+   - 执行引擎：ffprobe 逐段探测（时长缺失直接报错）→ 无音轨片段自动补 anullsrc 静音轨 → 逐段归一化（同分辨率/fps/像素格式/音轨 44.1k 立体声 + atrim 裁齐）→ concat filter（硬切）或 xfade/acrossfade 链（转场）→ libx264+aac 输出
+   - 实测 ×2：硬切 10.26s+5.13s → 15.39s 1080p（浏览器 E2E，19.7s 耗时）；叠化 10.26s+15.39s−0.6s → 25.07s（API 直测）✓ 注：早期怀疑的"时长不符"实为测试者记错输入时长（merge_mtccxlr7 是 10.26s 的 tpad 延长版），复算后完全吻合，引擎无误
+2. **素材库（assets-dialog + /api/assets）— 产物复用，避免重复生成**
+   - 浏览 /generated 与 /uploads 全部媒体（图片/视频/音频自动分类，≤300 条按时间倒序）；视频卡片 preload=metadata 显示首帧、悬停自动播放；类型筛选 tabs 带计数
+   - 支持上传（image/video/audio，80MB 上限）、下载、删除（路径正则白名单 + 前缀包含校验，/etc/passwd 实测被拒）
+   - **一键插入画布**：生成「素材引用」节点（sky 色，输入类），参数写入 kind/url/name，输出端口仅显示激活类型，节点即插即用（success 态直接可连线）
+   - 新节点类型 asset：3 个输出端口（image/video/audio），isConnectionValid 按 assetKind 激活端口校验；Inspector 切换素材类型时自动清空失效输出
+   - 实测：插入视频素材 → 连接 concat 段 1/段 2 → 真实拼接出片 ✓
+3. **运行历史对话框（history-dialog + /api/executions/history）**
+   - 展示最近 80 条执行记录（当前工作流维度或全局）：状态徽章/节点名/时间/耗时/错误/产物下载链接（视频/音频/图像/文本）
+   - 顶栏"···"菜单新增「运行历史」入口
+4. **视频首帧海报（poster）**
+   - 所有视频类输出（文生视频/图生视频/成片合成/视频拼接）落盘后自动 ffmpeg 抽首帧 poster.jpg，写入输出 meta.poster
+   - 节点内视频预览（生成类 + 视频预览节点）通过 <video poster> 即时显示封面，加载体验提升
+5. **上传 API 扩展**：/api/uploads 从仅图片扩展为 image/video/audio（EXT_MAP 白名单 + 80MB 保护），文件名前缀区分 up_/uv_/ua_
+
+### 验证结果汇总
+- concat 硬切 ×1（浏览器 E2E）+ 叠化 ×2（API）：出片时长逐帧吻合、aac 音轨、poster 生成 ✓
+- 素材库：16 项列表/筛选/上传 wav+mp4/删除/安全校验 ✓；插入画布 → concat 连线 → 执行 ✓
+- 运行历史：工作流维度记录（拼接 19.2s/配音 3.6s/合成 11s 等）+ 产物下载 ✓
+- lint 0/0；页面 200；工作流测试节点已清理并自动保存恢复原状
+
+### 未解决问题 / 风险
+- asset 节点在 Inspector 里切换素材类型后仅清空输出，assetUrl 仍指旧文件——建议下轮在切换时同时校验 url 后缀并提示"重新从素材库插入"
+- xfade 拼接为全量重编码（1080p 约 1x 实时耗时），长片拼接偏慢；可考虑预览用 speed 档（crf 23 + superfast）
+- html-to-image 缩略图仍排除 video/audio 元素（poster 无法参与缩略图捕获，该区域为空框）
+- 素材库无搜索/分页（当前 ≤300 条可接受）；删除素材不会清理引用它的工作流节点（有 confirm 提示兜底）
+- concat 段数上限 4（端口静态定义），更多段需动态端口方案
+
+### 下一轮建议（优先级从高到低）
+1. **「故事分镜」模板**：多段提示词 → 并行文生视频 → concat 拼接 → TTS 配音 → avMerge 成片（全链路 10+ 节点大模板，展示平台编排能力）
+2. asset 节点 Inspector 增强：类型切换时同步校验/更新 assetUrl，支持从 Inspector 直接打开素材库替换
+3. 素材库搜索框 + 按 kind/mtime 排序选项；poster 文件（poster_*）在素材库中默认折叠或归类
+4. 拼接性能优化：提供"快速预览"开关（crf 28 + superfast），导出时再全质量渲染
+5. 画布缩略图：截取视频首帧 poster 拼入缩略图（解决 video 元素空框）
+6. 移动端 Inspector 底部抽屉化；concat 动态端口（"添加分段"按钮，>4 段）

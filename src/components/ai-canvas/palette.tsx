@@ -17,6 +17,8 @@ import {
   AudioLines,
   Volume2,
   Merge,
+  Layers,
+  PackageOpen,
   ChevronDown,
   GripVertical,
 } from 'lucide-react'
@@ -43,6 +45,8 @@ const ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   AudioLines,
   Volume2,
   Merge,
+  Layers,
+  PackageOpen,
 }
 
 export function Palette() {

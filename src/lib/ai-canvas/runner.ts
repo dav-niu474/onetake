@@ -294,6 +294,8 @@ async function runAvMerge(
   await runFfmpeg(args, target, onProgress)
 
   onProgress('正在保存成片…', 96)
+  const url = `/generated/${outName}`
+  const poster = await makePoster(url)
   const outInfo = await probeMedia(outPath)
   const meta: Record<string, string | number> = {
     duration: fmtSec(outInfo.duration || target),
@@ -302,8 +304,9 @@ async function runAvMerge(
   if (outInfo.width && outInfo.height) {
     meta.resolution = `${outInfo.width}x${outInfo.height}`
   }
+  if (poster) meta.poster = poster
   return {
-    video: { kind: 'video', url: `/generated/${outName}`, meta },
+    video: { kind: 'video', url, meta },
   }
 }
 
@@ -475,10 +478,13 @@ async function runTextToVideo(
     with_audio: withAudio,
   })
   const remoteUrl = await pollVideoTask(zai, task.id, onProgress)
-  onProgress('正在下载视频…', 95)
+  onProgress('正在下载视频…', 93)
   const url = await downloadTo(remoteUrl, 'video')
+  const poster = await makePoster(url)
+  const meta: Record<string, string | number> = { quality, withAudio: withAudio ? 1 : 0 }
+  if (poster) meta.poster = poster
   return {
-    video: { kind: 'video', url, meta: { quality, withAudio: withAudio ? 1 : 0 } },
+    video: { kind: 'video', url, meta },
   }
 }
 
@@ -501,10 +507,191 @@ async function runImageToVideo(
     with_audio: withAudio,
   })
   const remoteUrl = await pollVideoTask(zai, task.id, onProgress)
-  onProgress('正在下载视频…', 95)
+  onProgress('正在下载视频…', 93)
   const url = await downloadTo(remoteUrl, 'video')
+  const poster = await makePoster(url)
+  const meta: Record<string, string | number> = { quality, withAudio: withAudio ? 1 : 0 }
+  if (poster) meta.poster = poster
   return {
-    video: { kind: 'video', url, meta: { quality, withAudio: withAudio ? 1 : 0 } },
+    video: { kind: 'video', url, meta },
+  }
+}
+
+/* ------------------------------ 视频拼接（多段顺序拼接 + 转场） ------------------------------ */
+
+const XFADE_TRANSITIONS = new Set(['fade', 'wipeleft', 'slideup', 'circleopen'])
+
+async function runConcat(
+  io: ExecIO,
+  onProgress: ProgressFn,
+): Promise<Record<string, { kind: string; url?: string; text?: string }>> {
+  const order = ['v1', 'v2', 'v3', 'v4']
+  const urls = order
+    .map((k) => io.inputs[k]?.url)
+    .filter((u): u is string => !!u)
+  if (urls.length < 2) {
+    throw new Error('至少需要连接两段视频（段 1 与 段 2）')
+  }
+  const transition = str(io.params, 'transition') || 'none'
+  const useFade = XFADE_TRANSITIONS.has(transition)
+  const fitMode = str(io.params, 'fitMode') || 'pad'
+
+  onProgress('正在读取视频片段…', 5)
+  const paths: string[] = []
+  const infos: MediaInfo[] = []
+  for (let i = 0; i < urls.length; i++) {
+    const p = await resolveMediaPath(urls[i], 'video')
+    const info = await probeMedia(p)
+    if (!info.duration || info.duration <= 0) {
+      throw new Error(`第 ${i + 1} 段视频时长读取失败，无法拼接`)
+    }
+    paths.push(p)
+    infos.push(info)
+    onProgress(
+      `正在读取视频片段… ${i + 1}/${urls.length}`,
+      5 + Math.round(((i + 1) / urls.length) * 12),
+    )
+  }
+
+  // 目标画幅：以首段为准（宽高取偶）
+  const evenize = (n: number | undefined, fb: number) => {
+    const v = n && n > 0 ? Math.round(n) : fb
+    return v % 2 === 0 ? v : v - 1
+  }
+  const W = evenize(infos[0].width, 1024)
+  const H = evenize(infos[0].height, 576)
+  const FPS = 30
+
+  // 转场时长不能超过最短片段
+  const minDur = Math.min(...infos.map((i) => i.duration))
+  const fadeDur = Math.min(
+    Math.max(0.2, num(io.params, 'transitionDuration') ?? 0.5),
+    Math.max(0.2, minDur - 0.3),
+  )
+
+  // 输入注册（无音轨的片段补静音轨）
+  const args: string[] = []
+  let inputIdx = 0
+  const segs = paths.map((p, i) => {
+    const videoIdx = inputIdx++
+    args.push('-i', p)
+    let audioIdx: number | null = null
+    if (!infos[i].hasAudio) {
+      args.push('-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo')
+      audioIdx = inputIdx++
+    }
+    return { videoIdx, audioIdx, dur: infos[i].duration }
+  })
+
+  // 逐段归一化（同分辨率 / 帧率 / 像素格式，音轨重采样并裁齐片段时长）
+  const filter: string[] = []
+  segs.forEach((s, i) => {
+    const dur = s.dur.toFixed(2)
+    // 注意：setpts 必须在 fps 之前，否则帧率元数据变为 1/0，xfade 会拒绝 CFR 校验
+    const vChain =
+      fitMode === 'crop'
+        ? `scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1,setpts=PTS-STARTPTS,fps=${FPS},format=yuv420p`
+        : `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2,setsar=1,setpts=PTS-STARTPTS,fps=${FPS},format=yuv420p`
+    filter.push(`[${s.videoIdx}:v]${vChain}[v${i}]`)
+    if (s.audioIdx !== null) {
+      filter.push(`[${s.audioIdx}:a]atrim=0:${dur},asetpts=PTS-STARTPTS[a${i}]`)
+    } else {
+      filter.push(
+        `[${s.videoIdx}:a]aresample=44100,aformat=sample_rates=44100:channel_layouts=stereo,atrim=0:${dur},asetpts=PTS-STARTPTS[a${i}]`,
+      )
+    }
+  })
+
+  const total: number =
+    useFade
+      ? segs.reduce((a, s) => a + s.dur, 0) - fadeDur * (segs.length - 1)
+      : segs.reduce((a, s) => a + s.dur, 0)
+
+  let vOut = 'v0'
+  let aOut = 'a0'
+  if (!useFade) {
+    const concatInputs = segs.map((_, i) => `[v${i}][a${i}]`).join('')
+    filter.push(`${concatInputs}concat=n=${segs.length}:v=1:a=1[vout][aout]`)
+    vOut = 'vout'
+    aOut = 'aout'
+  } else {
+    // xfade / acrossfade 转场链
+    let acc = segs[0].dur
+    for (let i = 1; i < segs.length; i++) {
+      const offset = Math.max(0, acc - fadeDur)
+      filter.push(
+        `[${vOut}][v${i}]xfade=transition=${transition}:duration=${fadeDur.toFixed(2)}:offset=${offset.toFixed(2)}[vx${i}]`,
+      )
+      filter.push(`[${aOut}][a${i}]acrossfade=d=${fadeDur.toFixed(2)}[ax${i}]`)
+      vOut = `vx${i}`
+      aOut = `ax${i}`
+      acc = acc + segs[i].dur - fadeDur
+    }
+  }
+
+  args.push('-filter_complex', filter.join(';'))
+  args.push('-map', `[${vOut}]`, '-map', `[${aOut}]`)
+  args.push(
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '192k',
+    '-movflags', '+faststart',
+  )
+
+  const outName = `concat_${Date.now().toString(36)}_${Math.random()
+    .toString(36)
+    .slice(2, 8)}.mp4`
+  const outPath = path.join(GEN_DIR, outName)
+  args.push(outPath)
+
+  onProgress(useFade ? '正在拼接（含转场渲染）…' : '正在拼接片段…', 18)
+  await runFfmpeg(args, total, onProgress)
+
+  onProgress('正在保存成片…', 96)
+  const url = `/generated/${outName}`
+  const poster = await makePoster(url)
+  const outInfo = await probeMedia(outPath)
+  const meta: Record<string, string | number> = {
+    duration: fmtSec(outInfo.duration || total),
+    segments: segs.length,
+    transition: useFade ? transition : 'cut',
+  }
+  if (outInfo.width && outInfo.height) {
+    meta.resolution = `${outInfo.width}x${outInfo.height}`
+  }
+  if (poster) meta.poster = poster
+  return { video: { kind: 'video', url, meta } }
+}
+
+/** 为视频生成首帧海报（poster），失败时静默返回 undefined */
+async function makePoster(videoUrl: string): Promise<string | undefined> {
+  try {
+    await ensureDirs()
+    const src = videoUrl.startsWith('/')
+      ? path.join(process.cwd(), 'public', videoUrl)
+      : videoUrl
+    const name = `poster_${Date.now().toString(36)}_${Math.random()
+      .toString(36)
+      .slice(2, 8)}.jpg`
+    const out = path.join(GEN_DIR, name)
+    const tryRun = (seek: string[]) =>
+      new Promise<void>((resolve, reject) => {
+        spawn(
+          'ffmpeg',
+          ['-hide_banner', '-y', ...seek, '-i', src, '-frames:v', '1', '-q:v', '4', out],
+        )
+          .on('error', reject)
+          .on('close', (c) => (c === 0 ? resolve() : reject(new Error('poster failed'))))
+      })
+    try {
+      await tryRun(['-ss', '0.1'])
+    } catch {
+      await tryRun([])
+    }
+    const st = await fs.stat(out).catch(() => null)
+    if (!st || st.size === 0) return undefined
+    return `/generated/${name}`
+  } catch {
+    return undefined
   }
 }
 
@@ -568,6 +755,8 @@ export async function executeNode(
       return runTTS(io, onProgress)
     case 'avMerge':
       return runAvMerge(io, onProgress)
+    case 'concat':
+      return runConcat(io, onProgress)
     default:
       throw new Error(`节点类型 ${nodeType} 不可执行`)
   }

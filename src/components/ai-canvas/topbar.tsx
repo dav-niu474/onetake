@@ -20,6 +20,8 @@ import {
   MoreHorizontal,
   FileDown,
   FileUp,
+  PackageOpen,
+  History,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -46,6 +48,8 @@ export function TopBar() {
   const setWorkflow = useCanvasStore((s) => s.setWorkflow)
   const setLibraryOpen = useCanvasStore((s) => s.setLibraryOpen)
   const setTemplatesOpen = useCanvasStore((s) => s.setTemplatesOpen)
+  const setAssetsOpen = useCanvasStore((s) => s.setAssetsOpen)
+  const setHistoryOpen = useCanvasStore((s) => s.setHistoryOpen)
   const importInputRef = useRef<HTMLInputElement>(null)
 
   return (
@@ -133,6 +137,15 @@ export function TopBar() {
           <FolderOpen className="h-3.5 w-3.5" />
           <span className="hidden md:inline">作品库</span>
         </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => setAssetsOpen(true)}
+          className="h-8 gap-1.5 text-[12px] text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+        >
+          <PackageOpen className="h-3.5 w-3.5" />
+          <span className="hidden md:inline">素材库</span>
+        </Button>
         <NewWorkflowButton />
 
         {/* 更多操作 */}
@@ -149,8 +162,15 @@ export function TopBar() {
           </DropdownMenuTrigger>
           <DropdownMenuContent
             align="end"
-            className="border-zinc-700/70 bg-zinc-900 text-zinc-200 rounded-lg"
+            className="rounded-lg border-zinc-700/70 bg-zinc-900 text-zinc-200"
           >
+            <DropdownMenuItem
+              onClick={() => setHistoryOpen(true)}
+              className="text-[12px] gap-2 cursor-pointer"
+            >
+              <History className="h-3.5 w-3.5 text-teal-300" />
+              运行历史
+            </DropdownMenuItem>
             <DropdownMenuItem
               onClick={exportWorkflowJson}
               className="text-[12px] gap-2 cursor-pointer"

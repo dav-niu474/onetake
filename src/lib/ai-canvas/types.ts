@@ -508,14 +508,112 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
     executable: false,
     width: 300,
   },
+  concat: {
+    type: 'concat',
+    name: '视频拼接',
+    description: '将多段视频按顺序拼接成片（支持转场）',
+    icon: 'Layers',
+    accent: 'lime',
+    category: 'process',
+    inputs: [
+      { id: 'v1', label: '段 1', kind: 'video', required: true },
+      { id: 'v2', label: '段 2', kind: 'video', required: true },
+      { id: 'v3', label: '段 3', kind: 'video' },
+      { id: 'v4', label: '段 4', kind: 'video' },
+    ],
+    outputs: [{ id: 'video', label: '视频', kind: 'video' }],
+    params: [
+      {
+        key: 'transition',
+        label: '转场效果',
+        type: 'select',
+        defaultValue: 'none',
+        options: [
+          { label: '硬切（无转场）', value: 'none' },
+          { label: '叠化', value: 'fade' },
+          { label: '擦除', value: 'wipeleft' },
+          { label: '上滑', value: 'slideup' },
+          { label: '圆形展开', value: 'circleopen' },
+        ],
+      },
+      {
+        key: 'transitionDuration',
+        label: '转场时长',
+        type: 'slider',
+        defaultValue: 0.5,
+        min: 0.2,
+        max: 2,
+        step: 0.1,
+        unit: 's',
+        hint: '仅转场效果非「硬切」时生效',
+      },
+      {
+        key: 'fitMode',
+        label: '画幅统一',
+        type: 'select',
+        defaultValue: 'pad',
+        options: [
+          { label: '以首段为准 · 留黑边', value: 'pad' },
+          { label: '以首段为准 · 裁剪填满', value: 'crop' },
+        ],
+      },
+    ],
+    executable: true,
+    width: 300,
+  },
+  asset: {
+    type: 'asset',
+    name: '素材引用',
+    description: '引用素材库中的图片 / 视频 / 音频，避免重复生成',
+    icon: 'PackageOpen',
+    accent: 'sky',
+    category: 'input',
+    inputs: [],
+    outputs: [
+      { id: 'image', label: '图像', kind: 'image' },
+      { id: 'video', label: '视频', kind: 'video' },
+      { id: 'audio', label: '音频', kind: 'audio' },
+    ],
+    params: [
+      {
+        key: 'assetKind',
+        label: '素材类型',
+        type: 'select',
+        defaultValue: 'image',
+        options: [
+          { label: '图像', value: 'image' },
+          { label: '视频', value: 'video' },
+          { label: '音频', value: 'audio' },
+        ],
+      },
+      {
+        key: 'assetUrl',
+        label: '素材地址',
+        type: 'text',
+        defaultValue: '',
+      },
+      {
+        key: 'assetName',
+        label: '素材名称',
+        type: 'text',
+        defaultValue: '',
+      },
+    ],
+    executable: false,
+    width: 280,
+  },
 }
 
 export const NODE_TYPE_LIST = Object.values(NODE_SPECS)
 
-/** 判断连接是否合法（类型匹配） */
+/**
+ * 判断连接是否合法（类型匹配）
+ * @param sourceNodeData 素材引用节点仅激活与 assetKind 匹配的输出端口
+ */
 export function isConnectionValid(
   source: { type: string; handleId: string | null },
   target: { type: string; handleId: string | null },
+  sourceNodeData?: CanvasNodeData,
 ): boolean {
   const srcSpec = NODE_SPECS[source.type]
   const tgtSpec = NODE_SPECS[target.type]
@@ -523,6 +621,10 @@ export function isConnectionValid(
   const out = srcSpec.outputs.find((o) => o.id === source.handleId)
   const inp = tgtSpec.inputs.find((i) => i.id === target.handleId)
   if (!out || !inp) return false
+  if (source.type === 'asset' && sourceNodeData) {
+    const activeKind = String(sourceNodeData.params?.assetKind ?? 'image')
+    if (out.kind !== activeKind) return false
+  }
   return out.kind === inp.kind
 }
 
