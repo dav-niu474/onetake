@@ -793,3 +793,49 @@ Task: 添加仓库 README 说明与 GitHub About 描述
 1. 沿用 Task 11 建议：tv3 补跑（配额释放后）→ 三幕成片闭环
 2. 「运行所选」完整链路实测；多选拖拽与对齐参考线协调
 3. 历史对话框按 nodeId 分组折叠；MiniMap 点击定位联动
+
+---
+
+## Task ID: 13 — 项目定名「一镜 OneTake」+ IP 形象「导演阿镜」设计
+Agent: main (Z.ai Code)
+Task: 品牌命名推演 + IP 形象设计 + 品牌资产入库
+
+### 项目当前状态描述/判断
+- 用户提出为项目定名（将用于仓库/网站/IP 品牌），并设计 IP 形象
+- 图像生成 API 全程 429（共享账号配额被视频僵尸任务占用，与 Task 8-11 的外部约束一致）→ 改用手写 SVG 矢量品牌资产方案（对仓库 logo 而言更优：无限缩放/可版本管理/中文文字不乱码）
+
+### 命名结论：一镜 OneTake
+- 推演过程：候选池（NodeReel/CineNode/ClipCat/FlowCut/一镜）× 5 维评估（概念契合/记忆度/中英双栖/IP 潜力/独特性）
+- 定名理由：①「一镜到底」= 产品承诺（文案→画面→配音→剪辑一张画布一条流）② 英文 OneTake = 片场行话「一条过」，中英各自地道 ③ 短、可口号化（"一镜，一条过！"）
+- repo slug 保持 agent-video-canvas（重命名需用户确认，GitHub 会自动重定向，可后续执行）
+
+### IP 形象：导演阿镜（A-Jing）
+- 橘色虎斑猫导演：黑色贝雷帽 + 场记板（写「一镜 ONE TAKE」）+ 尾巴末端视频线缆插头（节点连线隐喻）+ 光圈瞳孔 + 琥珀毛色（=画布运行态主色）
+- 性格：完美主义「一条过」哲学；口头禅 "一镜，一条过！" / "That's a wrap~"
+
+### 已产出资产（全部 SVG 手绘矢量）
+- docs/brand/logo.svg — 场记板 × 节点链徽标（顶部胶板条纹由发光节点方块+连线构成，播放键琥珀发光）
+- docs/brand/mascot-ajing.svg — 阿镜主形象立绘（520×580，深色底 + 光晕 + 隐约节点网 + 底部标语）
+- docs/brand/banner.svg — 1200×280 README 品牌横幅（logo + 中文「一镜」+ ONETAKE + 标语 + 节点流装饰）
+- public/onetake-logo.svg — favicon（复制自 logo.svg）
+- agent-browser 渲染 QC 通过（mascot/logo/banner 三图逐一截图查验，修复 1 处横幅节点压字）
+
+### 品牌落地改动
+- README.md：标题改为「一镜 OneTake」+ 品牌横幅置顶 + 新增「品牌与 IP：导演阿镜」章节（含立绘与设定）
+- topbar.tsx：应用顶栏品牌名改为「一镜 OneTake」（副标题：节点式 AI 视频创作画布 · 一镜到底一条过）
+- layout.tsx：metadata title/description/keywords 品牌化，favicon 指向 /onetake-logo.svg，lang 改 zh-CN
+- GitHub About：description 更新为「🎬 一镜 OneTake — 节点式 AI 视频创作画布：…一镜到底一条过 | Node-based…」（API 回读确认）
+
+### 验证结果
+- lint 0 错误；app 200；agent-browser 截图确认顶栏品牌渲染正常、画布无回归
+- 推送：026f1cb..36f80e4 main -> main
+
+### 未解决问题 / 风险
+- 图像生成 API 仍 429：后续配额恢复后，可用 AI 生图产出更精细的阿镜插画版本（多姿势/表情包）替换或补充 SVG 版
+- repo slug 重命名待用户确认（建议 agent-video-canvas → onetake 或 yijing-onetake）
+- 阿镜形象后续可扩展：表情包（一条过/NG/收工三态）、空态引导插图、404 页
+
+### 下一轮建议（优先级从高到低）
+1. repo slug 重命名确认 + 阿镜表情包扩展（配额恢复后）
+2. 沿用 Task 11/12 建议：tv3 补跑 → 三幕成片闭环
+3. 画布空态欢迎卡加入阿镜形象（SVG 已就绪，可直接 <img> 引用 /onetake-logo.svg 或 mascot）
