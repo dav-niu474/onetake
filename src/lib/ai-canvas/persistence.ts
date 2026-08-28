@@ -1,7 +1,7 @@
 'use client'
 
 /**
- * 工作流持久化：保存 / 自动保存 / 打开 / 删除
+ * 工作流持久化：保存 / 自动保存 / 打开 / 删除 / 缩略图捕获
  */
 import { useCanvasStore } from './store'
 import { resumeWorkflowTasks, syncOutputsAfterLoad } from './executor'
@@ -34,6 +34,45 @@ function serializeGraph() {
   return { nodes: cleanNodes, edges: cleanEdges }
 }
 
+/**
+ * 捕获画布缩略图（React Flow viewport → PNG → 降采样 JPEG dataURL）
+ * 失败时返回 null，不阻塞保存流程
+ */
+async function captureThumbnail(): Promise<string | null> {
+  try {
+    const viewport = document.querySelector('.react-flow__viewport') as HTMLElement | null
+    if (!viewport) return null
+    const { toPng } = await import('html-to-image')
+    const raw = await toPng(viewport, {
+      backgroundColor: '#09090b',
+      pixelRatio: 1,
+      filter: (domNode) => {
+        const el = domNode as HTMLElement
+        if (el.classList?.contains('react-flow__node-toolbar')) return false
+        if (el.tagName === 'VIDEO' || el.tagName === 'AUDIO') return false
+        return true
+      },
+    })
+    // 降采样到最大宽度 640，控制存储体积
+    const img = new Image()
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve()
+      img.onerror = () => reject(new Error('缩略图解码失败'))
+      img.src = raw
+    })
+    const scale = Math.min(1, 640 / Math.max(1, img.width))
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(img.width * scale))
+    canvas.height = Math.max(1, Math.round(img.height * scale))
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+    return canvas.toDataURL('image/jpeg', 0.72)
+  } catch {
+    return null
+  }
+}
+
 /** 保存工作流（新建或更新） */
 export async function saveWorkflow(): Promise<string | null> {
   const store = useCanvasStore.getState()
@@ -41,19 +80,22 @@ export async function saveWorkflow(): Promise<string | null> {
   store.setSaving(true)
   try {
     const graph = serializeGraph()
+    // 有节点时捕获画布缩略图（运行中跳过，避免卡顿）
+    const thumbnail =
+      graph.nodes.length > 0 && !store.running ? await captureThumbnail() : null
     let id = workflow.id
     if (id) {
       const res = await fetch(`/api/workflows/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: workflow.name, graph }),
+        body: JSON.stringify({ name: workflow.name, graph, ...(thumbnail ? { thumbnail } : {}) }),
       })
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || '保存失败')
     } else {
       const res = await fetch('/api/workflows', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: workflow.name, graph }),
+        body: JSON.stringify({ name: workflow.name, graph, ...(thumbnail ? { thumbnail } : {}) }),
       })
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || '保存失败')
       const wf = await res.json()

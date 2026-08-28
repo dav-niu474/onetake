@@ -4,8 +4,12 @@
  */
 import fs from 'fs/promises'
 import path from 'path'
+import { execFile, spawn } from 'child_process'
+import { promisify } from 'util'
 import ZAI from 'z-ai-web-dev-sdk'
 import { db } from '@/lib/db'
+
+const execFileAsync = promisify(execFile)
 
 const GEN_DIR = path.join(process.cwd(), 'public', 'generated')
 const UPLOAD_DIR = path.join(process.cwd(), 'public', 'uploads')
@@ -112,6 +116,195 @@ function str(params: Record<string, unknown>, key: string): string {
 
 function bool(params: Record<string, unknown>, key: string): boolean {
   return params[key] === true || params[key] === 'true'
+}
+
+/* ------------------------------ 媒体工具（ffmpeg） ------------------------------ */
+
+/** 将媒体 URL（本地路径 / 远程地址）解析为服务端本地文件路径 */
+async function resolveMediaPath(
+  url: string,
+  kind: 'video' | 'audio',
+): Promise<string> {
+  if (url.startsWith('/')) {
+    return path.join(process.cwd(), 'public', url)
+  }
+  await ensureDirs()
+  const file = `dl_${Date.now().toString(36)}_${Math.random()
+    .toString(36)
+    .slice(2, 8)}.${kind === 'video' ? 'mp4' : 'wav'}`
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`媒体下载失败: HTTP ${res.status}`)
+  const buf = Buffer.from(await res.arrayBuffer())
+  await fs.writeFile(path.join(GEN_DIR, file), buf)
+  return path.join(GEN_DIR, file)
+}
+
+interface MediaInfo {
+  hasAudio: boolean
+  duration: number
+  width?: number
+  height?: number
+}
+
+/** 使用 ffprobe 读取媒体信息（失败时给出宽松默认值） */
+async function probeMedia(file: string): Promise<MediaInfo> {
+  try {
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'error',
+      '-print_format', 'json',
+      '-show_format',
+      '-show_streams',
+      file,
+    ])
+    const j = JSON.parse(stdout) as {
+      streams?: { codec_type?: string; width?: number; height?: number }[]
+      format?: { duration?: string }
+    }
+    const videoStream = j.streams?.find((s) => s.codec_type === 'video')
+    return {
+      hasAudio: (j.streams ?? []).some((s) => s.codec_type === 'audio'),
+      duration: Number(j.format?.duration ?? 0) || 0,
+      width: videoStream?.width,
+      height: videoStream?.height,
+    }
+  } catch {
+    return { hasAudio: true, duration: 0 }
+  }
+}
+
+const fmtSec = (s: number) => `${Math.round(s * 10) / 10}s`
+
+/** 运行 ffmpeg，解析 stderr time= 汇报进度 */
+function runFfmpeg(
+  args: string[],
+  total: number,
+  onProgress: ProgressFn,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const p = spawn('ffmpeg', ['-hide_banner', '-y', ...args])
+    let lastEmit = 0
+    let errTail = ''
+    p.stderr.on('data', (d) => {
+      const s = String(d)
+      errTail = (errTail + s).slice(-4000)
+      const m = s.match(/time=(\d+):(\d+):(\d+(?:\.\d+)?)/)
+      if (m && total > 0) {
+        const sec = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3])
+        const now = Date.now()
+        if (now - lastEmit > 800) {
+          lastEmit = now
+          onProgress(
+            `正在合成… ${fmtSec(sec)} / ${fmtSec(total)}`,
+            Math.min(96, Math.round(10 + (sec / total) * 85)),
+          )
+        }
+      }
+    })
+    p.on('error', reject)
+    p.on('close', (code) => {
+      if (code === 0) return resolve()
+      const tail = errTail
+        .split('\n')
+        .filter((l) => l.trim())
+        .slice(-2)
+        .join(' ')
+      reject(new Error(`ffmpeg 合成失败（code ${code}）：${tail}`))
+    })
+  })
+}
+
+/* ------------------------------ 成片合成（音视频混流） ------------------------------ */
+
+async function runAvMerge(
+  io: ExecIO,
+  onProgress: ProgressFn,
+): Promise<Record<string, { kind: string; url?: string; text?: string }>> {
+  const videoUrl = io.inputs.video?.url
+  const audioUrl = io.inputs.audio?.url
+  if (!videoUrl) throw new Error('缺少视频输入：请连接上游视频节点')
+  if (!audioUrl) throw new Error('缺少音频输入：请连接配音 / 音频节点')
+  const keepOriginal = bool(io.params, 'keepOriginal')
+  const vVol = num(io.params, 'videoVolume') ?? 1
+  const aVol = num(io.params, 'audioVolume') ?? 1
+  const durationMode = str(io.params, 'durationMode') || 'video'
+
+  onProgress('正在读取媒体…', 6)
+  const videoPath = await resolveMediaPath(videoUrl, 'video')
+  const audioPath = await resolveMediaPath(audioUrl, 'audio')
+
+  onProgress('正在分析音视频…', 14)
+  const vInfo = await probeMedia(videoPath)
+  const aInfo = await probeMedia(audioPath)
+  const target =
+    durationMode === 'video'
+      ? vInfo.duration || aInfo.duration
+      : aInfo.duration || vInfo.duration
+
+  // 是否需要延长视频画面（clone 最后一帧，需重编码）
+  const needVideoPad =
+    durationMode === 'audio' &&
+    target > 0 &&
+    vInfo.duration > 0 &&
+    aInfo.duration > vInfo.duration + 0.05
+  const videoReencode = needVideoPad
+
+  const filterParts: string[] = []
+  if (needVideoPad) {
+    const pad = (target - vInfo.duration + 0.2).toFixed(2)
+    filterParts.push(`[0:v]tpad=stop_mode=clone:stop_duration=${pad}[vout]`)
+  }
+  const mix = keepOriginal && vInfo.hasAudio
+  if (mix) {
+    const padExpr = target > 0 ? `apad=whole_dur=${target.toFixed(2)}` : 'apad'
+    filterParts.push(`[0:a]volume=${vVol},${padExpr}[a0]`)
+    filterParts.push(`[1:a]volume=${aVol},${padExpr}[a1]`)
+    filterParts.push(
+      `[a0][a1]amix=inputs=2:duration=longest:normalize=0[aout]`,
+    )
+  }
+
+  const args: string[] = ['-i', videoPath, '-i', audioPath]
+  if (filterParts.length > 0) args.push('-filter_complex', filterParts.join(';'))
+  args.push('-map', needVideoPad ? '[vout]' : '0:v')
+  if (mix) {
+    args.push('-map', '[aout]')
+  } else {
+    args.push('-map', '1:a')
+    const padExpr = target > 0 ? `apad=whole_dur=${target.toFixed(2)}` : 'apad'
+    args.push('-af', `volume=${aVol},${padExpr}`)
+  }
+  if (videoReencode) {
+    args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p')
+  } else {
+    args.push('-c:v', 'copy')
+  }
+  args.push(
+    '-c:a', 'aac', '-b:a', '192k',
+    '-shortest',
+    '-movflags', '+faststart',
+  )
+
+  const outName = `merge_${Date.now().toString(36)}_${Math.random()
+    .toString(36)
+    .slice(2, 8)}.mp4`
+  const outPath = path.join(GEN_DIR, outName)
+  args.push(outPath)
+
+  onProgress('开始合成…', 10)
+  await runFfmpeg(args, target, onProgress)
+
+  onProgress('正在保存成片…', 96)
+  const outInfo = await probeMedia(outPath)
+  const meta: Record<string, string | number> = {
+    duration: fmtSec(outInfo.duration || target),
+    mixed: mix ? 1 : 0,
+  }
+  if (outInfo.width && outInfo.height) {
+    meta.resolution = `${outInfo.width}x${outInfo.height}`
+  }
+  return {
+    video: { kind: 'video', url: `/generated/${outName}`, meta },
+  }
 }
 
 /* ------------------------------ LLM 提示词优化 ------------------------------ */
@@ -373,6 +566,8 @@ export async function executeNode(
       return runImageToVideo(io, onProgress)
     case 'tts':
       return runTTS(io, onProgress)
+    case 'avMerge':
+      return runAvMerge(io, onProgress)
     default:
       throw new Error(`节点类型 ${nodeType} 不可执行`)
   }

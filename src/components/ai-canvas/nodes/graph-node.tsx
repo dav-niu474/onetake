@@ -3,7 +3,7 @@
 /**
  * 通用画布节点：根据节点注册表渲染端口 / 参数 / 预览 / 运行状态
  */
-import { memo, useCallback, useRef, useState } from 'react'
+import { memo, useCallback, useMemo, useRef, useState } from 'react'
 import { Handle, Position, NodeToolbar, type NodeProps } from '@xyflow/react'
 import {
   Type,
@@ -27,6 +27,7 @@ import {
   RotateCcw,
   AudioLines,
   Volume2,
+  Merge,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -53,6 +54,7 @@ const ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   MonitorPlay,
   AudioLines,
   Volume2,
+  Merge,
 }
 
 /* --------------------------------- 端口行 --------------------------------- */
@@ -399,7 +401,7 @@ function NodeBody({
         </>
       )}
 
-      {(type === 'textToVideo' || type === 'imageToVideo') && (
+      {(type === 'textToVideo' || type === 'imageToVideo' || type === 'avMerge') && (
         <>
           {running ? (
             <RunningPlaceholder label="视频生成中" progress={data.progress ?? 0} stage={data.stage} />
@@ -412,7 +414,9 @@ function NodeBody({
           ) : (
             <div className="flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-zinc-800 py-5">
               <Film className="h-4 w-4 text-zinc-700" />
-              <span className="text-[10px] text-zinc-600">尚未生成视频</span>
+              <span className="text-[10px] text-zinc-600">
+                {type === 'avMerge' ? '尚未合成成片' : '尚未生成视频'}
+              </span>
             </div>
           )}
         </>
@@ -449,13 +453,21 @@ export const GraphNode = memo(function GraphNode({ id, type, data, selected }: N
   const updateNodeData = useCanvasStore((s) => s.updateNodeData)
   const removeNode = useCanvasStore((s) => s.removeNode)
   const duplicateNode = useCanvasStore((s) => s.duplicateNode)
+  const edges = useCanvasStore((s) => s.edges)
+
+  /* 基于连线实时计算端口连接状态（连线后立即点亮） */
+  const connectedInputs = useMemo(
+    () => new Set(edges.filter((e) => e.target === id).map((e) => e.targetHandle ?? '')),
+    [edges, id],
+  )
+  const connectedOutputs = useMemo(
+    () => new Set(edges.filter((e) => e.source === id).map((e) => e.sourceHandle ?? '')),
+    [edges, id],
+  )
 
   const [editing, setEditing] = useState(false)
   const label = data.label ?? spec?.name ?? type
   const runState = data.runState ?? 'idle'
-  const connectedSources = new Set<string>()
-  // 端口连接状态用于展示（从 store 读取会带来订阅压力，用 data.inputs 近似）
-  Object.keys(data.inputs ?? {}).forEach((k) => connectedSources.add(k))
 
   if (!spec) {
     return (
@@ -577,11 +589,11 @@ export const GraphNode = memo(function GraphNode({ id, type, data, selected }: N
       {/* 内容 */}
       <div className="space-y-1.5 px-3 py-2.5">
         {spec.inputs.map((inp) => (
-          <PortRow key={inp.id} port={inp} kind="target" connected={!!(data.inputs ?? {})[inp.id]} side="left" />
+          <PortRow key={inp.id} port={inp} kind="target" connected={connectedInputs.has(inp.id)} side="left" />
         ))}
         <NodeBody id={id} type={type ?? ''} data={data} disabled={runState === 'running'} />
         {spec.outputs.map((out) => (
-          <PortRow key={out.id} port={out} kind="source" connected={!!(data.outputs ?? {})[out.id]} side="right" />
+          <PortRow key={out.id} port={out} kind="source" connected={connectedOutputs.has(out.id)} side="right" />
         ))}
       </div>
 

@@ -134,8 +134,8 @@ export const TEMPLATES: WorkflowTemplate[] = [
   },
   {
     id: 'voiceover',
-    name: '口播视频 · 配音一条龙',
-    description: '文案一键配音 + 画面生成，双轨并行创作',
+    name: '口播视频 · 配音合成成片',
+    description: '文案配音 + 画面生成 + 成片合成，一键出成品',
     tag: '自媒体',
     gradient: 'from-rose-500/20 via-fuchsia-500/10 to-transparent',
     build: () => ({
@@ -149,13 +149,16 @@ export const TEMPLATES: WorkflowTemplate[] = [
           text: '未来感科技实验室内部，全息投影界面漂浮在空中，蓝紫色光线交织，镜头缓慢横移',
         }),
         node('v5', 'textToVideo', 460, 380, { quality: 'quality', withAudio: false }),
-        node('v6', 'videoPreview', 860, 400),
+        node('v6', 'avMerge', 1260, 200, { keepOriginal: false, audioVolume: 1, durationMode: 'video' }),
+        node('v7', 'videoPreview', 1640, 220),
       ],
       edges: [
         edge('v1', 'text', 'v2', 'text'),
         edge('v2', 'audio', 'v3', 'audio'),
+        edge('v2', 'audio', 'v6', 'audio'),
         edge('v4', 'text', 'v5', 'text'),
         edge('v5', 'video', 'v6', 'video'),
+        edge('v6', 'video', 'v7', 'video'),
       ],
     }),
   },

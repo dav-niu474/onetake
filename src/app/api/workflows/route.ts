@@ -33,6 +33,7 @@ export async function POST(req: NextRequest) {
         name: typeof body.name === 'string' && body.name.trim() ? body.name.trim() : '未命名工作流',
         description: typeof body.description === 'string' ? body.description : '',
         graph: typeof body.graph === 'string' ? body.graph : JSON.stringify(body.graph ?? { nodes: [], edges: [] }),
+        ...(typeof body.thumbnail === 'string' ? { thumbnail: body.thumbnail } : {}),
       },
     })
     return NextResponse.json(wf)

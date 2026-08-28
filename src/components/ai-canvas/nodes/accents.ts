@@ -43,6 +43,16 @@ export const ACCENTS: Record<string, AccentClasses> = {
     glow: 'shadow-[0_0_28px_-8px_rgba(20,184,166,0.55)]',
     hex: '#2dd4bf',
   },
+  cyan: {
+    text: 'text-cyan-300',
+    chipBg: 'bg-cyan-500/15',
+    softBg: 'bg-cyan-500/10',
+    border: 'border-cyan-500/30',
+    solid: 'bg-cyan-500',
+    gradient: 'from-cyan-500/15 to-transparent',
+    glow: 'shadow-[0_0_28px_-8px_rgba(6,182,212,0.55)]',
+    hex: '#22d3ee',
+  },
   fuchsia: {
     text: 'text-fuchsia-400',
     chipBg: 'bg-fuchsia-500/15',

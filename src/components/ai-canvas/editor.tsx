@@ -26,6 +26,7 @@ import {
   Wand2,
   Maximize,
   Layers,
+  Grid3x3,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -42,6 +43,7 @@ import { GraphNode } from './nodes/graph-node'
 import { CanvasEdge } from './canvas-edge'
 import { TopBar } from './topbar'
 import { Palette } from './palette'
+import { Inspector } from './inspector'
 import { LibraryDialog } from './library-dialog'
 import { TemplatesDialog } from './templates-dialog'
 
@@ -60,9 +62,12 @@ function StatusBar() {
   const nodes = useCanvasStore((s) => s.nodes)
   const edges = useCanvasStore((s) => s.edges)
   const running = useCanvasStore((s) => s.running)
+  const snapToGrid = useCanvasStore((s) => s.snapToGrid)
+  const setSnapToGrid = useCanvasStore((s) => s.setSnapToGrid)
   const zoom = useStore((s) => s.transform[2])
   const { fitView } = useReactFlow()
   const successCount = nodes.filter((n) => n.data.runState === 'success').length
+  const selectedCount = nodes.filter((n) => n.selected).length
 
   return (
     <footer className="mt-auto flex h-7 shrink-0 items-center gap-4 border-t border-zinc-800/80 bg-zinc-950/95 px-4 text-[10px] text-zinc-500 backdrop-blur">
@@ -70,25 +75,39 @@ function StatusBar() {
         <Layers className="h-3 w-3" />
         {nodes.length} 节点 · {edges.length} 连线
       </span>
+      {selectedCount > 0 && (
+        <span className="hidden text-zinc-400 sm:inline">已选 {selectedCount} 项</span>
+      )}
       {running && (
         <span className="flex items-center gap-1.5 text-amber-300">
           <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
-          工作流运行中…
+          <span className="hidden sm:inline">工作流运行中…</span>
         </span>
       )}
       {!running && successCount > 0 && (
-        <span className="text-emerald-400/80">✓ {successCount} 个节点已就绪</span>
+        <span className="hidden text-emerald-400/80 sm:inline">✓ {successCount} 个节点已就绪</span>
       )}
       <span className="ml-auto hidden sm:inline">
         拖入节点 → 连线 → 点击「运行」生成 AI 视频
       </span>
+      <button
+        onClick={() => setSnapToGrid(!snapToGrid)}
+        className={cn(
+          'flex items-center gap-1 rounded px-1.5 py-0.5 transition hover:bg-zinc-800',
+          snapToGrid ? 'text-amber-300' : 'text-zinc-500 hover:text-zinc-300',
+        )}
+        title="网格吸附（拖动节点时对齐 16px 网格）"
+      >
+        <Grid3x3 className="h-3 w-3" />
+        <span className="hidden lg:inline">网格吸附</span>
+      </button>
       <button
         onClick={() => void fitView({ duration: 400, padding: 0.15 })}
         className="flex items-center gap-1 rounded px-1.5 py-0.5 transition hover:bg-zinc-800 hover:text-zinc-300"
         title="适应视图"
       >
         <Maximize className="h-3 w-3" />
-        适应视图
+        <span className="hidden sm:inline">适应视图</span>
       </button>
       <button
         onClick={() => autoLayout()}
@@ -96,7 +115,7 @@ function StatusBar() {
         title="自动整理布局"
       >
         <Wand2 className="h-3 w-3" />
-        整理布局
+        <span className="hidden sm:inline">整理布局</span>
       </button>
       <span className="tabular-nums">{Math.round(zoom * 100)}%</span>
     </footer>
@@ -136,6 +155,7 @@ function CanvasInner() {
   const { screenToFlowPosition } = useReactFlow()
   const nodes = useCanvasStore((s) => s.nodes)
   const edges = useCanvasStore((s) => s.edges)
+  const snapToGrid = useCanvasStore((s) => s.snapToGrid)
   const onNodesChange = useCanvasStore((s) => s.onNodesChange)
   const onEdgesChange = useCanvasStore((s) => s.onEdgesChange)
   const onConnect = useCanvasStore((s) => s.onConnect)
@@ -307,6 +327,16 @@ function CanvasInner() {
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
             isValidConnection={isValidConnection}
+            snapToGrid={snapToGrid}
+            snapGrid={[16, 16]}
+            onBeforeDelete={async ({ nodes: delNodes }) => {
+              if (delNodes.length > 1) {
+                return window.confirm(
+                  `确定删除选中的 ${delNodes.length} 个节点及其连线？`,
+                )
+              }
+              return true
+            }}
             onPaneContextMenu={openPaneMenu}
             onPaneClick={closeMenu}
             onMoveStart={closeMenu}
@@ -355,6 +385,9 @@ function CanvasInner() {
               nodeStrokeWidth={2}
             />
           </ReactFlow>
+
+          {/* 右侧 Inspector 属性面板（选中单个节点时） */}
+          <Inspector />
 
           {/* 空画布引导 */}
           {nodes.length === 0 && (

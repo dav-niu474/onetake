@@ -16,6 +16,7 @@ import {
   MonitorPlay,
   AudioLines,
   Volume2,
+  Merge,
   ChevronDown,
   GripVertical,
 } from 'lucide-react'
@@ -41,6 +42,7 @@ const ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   MonitorPlay,
   AudioLines,
   Volume2,
+  Merge,
 }
 
 export function Palette() {
@@ -52,7 +54,7 @@ export function Palette() {
     return (
       <button
         onClick={() => setOpen(true)}
-        className="absolute left-3 top-1/2 z-10 flex h-16 w-7 -translate-y-1/2 flex-col items-center justify-center gap-1 rounded-lg border border-zinc-700/70 bg-zinc-900/90 text-zinc-400 shadow-xl backdrop-blur transition hover:text-zinc-200"
+        className="absolute left-3 top-1/2 z-30 flex h-16 w-7 -translate-y-1/2 flex-col items-center justify-center gap-1 rounded-lg border border-zinc-700/70 bg-zinc-900/90 text-zinc-400 shadow-xl backdrop-blur transition hover:text-zinc-200 md:z-10"
         title="展开节点面板"
       >
         <span className="h-1 w-1 rounded-full bg-zinc-500" />
@@ -67,7 +69,7 @@ export function Palette() {
   )
 
   return (
-    <aside className="relative z-10 flex h-full w-60 shrink-0 flex-col border-r border-zinc-800/80 bg-zinc-950/95 backdrop-blur">
+    <aside className="absolute inset-y-0 left-0 z-30 flex h-full w-60 shrink-0 flex-col border-r border-zinc-800/80 bg-zinc-950/98 shadow-2xl backdrop-blur md:relative md:z-10 md:bg-zinc-950/95 md:shadow-none">
       <div className="flex items-center justify-between px-4 pb-2 pt-3.5">
         <div>
           <h2 className="text-[13px] font-semibold text-zinc-100">节点库</h2>

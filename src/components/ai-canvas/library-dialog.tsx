@@ -27,6 +27,7 @@ interface WorkflowItem {
   id: string
   name: string
   description: string
+  thumbnail?: string | null
   updatedAt: string
 }
 
@@ -95,9 +96,17 @@ export function LibraryDialog() {
                     key={item.id}
                     className="group flex items-center gap-3 rounded-lg border border-zinc-800/80 bg-zinc-900/60 p-3 transition hover:border-zinc-600 hover:bg-zinc-900"
                   >
-                    <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-amber-500/20 to-fuchsia-500/20 text-amber-300">
-                      <PenLine className="h-4 w-4" />
-                    </span>
+                    {item.thumbnail ? (
+                      <img
+                        src={item.thumbnail}
+                        alt={`${item.name} 缩略图`}
+                        className="h-11 w-[68px] shrink-0 rounded-md border border-zinc-700/70 object-cover"
+                      />
+                    ) : (
+                      <span className="flex h-11 w-[68px] shrink-0 items-center justify-center rounded-md bg-gradient-to-br from-amber-500/20 to-fuchsia-500/20 text-amber-300">
+                        <PenLine className="h-4 w-4" />
+                      </span>
+                    )}
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-[13px] font-medium text-zinc-200">
                         {item.name}

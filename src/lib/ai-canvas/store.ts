@@ -39,6 +39,13 @@ interface HistoryEntry {
 
 const HISTORY_LIMIT = 60
 
+/**
+ * 移除类提交合并元数据：
+ * React Flow 删除元素时会在同一同步任务内先派发连线移除、再派发节点移除，
+ * 两次移除必须共享同一份「删除前」快照，否则撤销会出现中间态。
+ */
+const lastRemovalCommit = { at: 0, active: false }
+
 export interface CanvasStore {
   /* 画布数据 */
   nodes: Node<CanvasNodeData>[]
@@ -64,6 +71,7 @@ export interface CanvasStore {
   paletteOpen: boolean
   libraryOpen: boolean
   templatesOpen: boolean
+  snapToGrid: boolean
   toast: { type: 'success' | 'error' | 'info'; message: string } | null
 
   /* ---- actions ---- */
@@ -71,6 +79,7 @@ export interface CanvasStore {
   onEdgesChange: (changes: EdgeChange[]) => void
   onConnect: (conn: Connection) => void
   commit: () => void
+  commitRemoval: () => void
   undo: () => void
   redo: () => void
   copySelection: () => boolean
@@ -108,6 +117,7 @@ export interface CanvasStore {
   setPaletteOpen: (v: boolean) => void
   setLibraryOpen: (v: boolean) => void
   setTemplatesOpen: (v: boolean) => void
+  setSnapToGrid: (v: boolean) => void
   showToast: (type: 'success' | 'error' | 'info', message: string) => void
   clearToast: () => void
 }
@@ -136,21 +146,39 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
   paletteOpen: true,
   libraryOpen: false,
   templatesOpen: false,
+  snapToGrid: false,
   toast: null,
 
   /* 结构性变更前调用：快照当前状态入历史栈 */
-  commit: () =>
+  commit: () => {
+    lastRemovalCommit.active = false
     set((s) => ({
       past: [
         ...s.past.slice(-(HISTORY_LIMIT - 1)),
         { nodes: structuredClone(s.nodes), edges: structuredClone(s.edges) },
       ],
       future: [],
-    })),
+    }))
+  },
+
+  /* 移除类操作专用提交：同一移除批次（同步任务内）仅保留首份快照 */
+  commitRemoval: () => {
+    const now = Date.now()
+    if (lastRemovalCommit.active && now - lastRemovalCommit.at < 200) {
+      // 连续移除（连线 + 节点）：沿用第一份快照，避免撤销出现中间态
+      lastRemovalCommit.at = now
+      return
+    }
+    lastRemovalCommit.at = now
+    lastRemovalCommit.active = true
+    get().commit()
+    lastRemovalCommit.active = true // commit() 会重置标记，恢复它
+  },
 
   undo: () => {
     const { past, future, nodes, edges } = get()
     if (past.length === 0) return
+    lastRemovalCommit.active = false
     const prev = past[past.length - 1]
     set({
       past: past.slice(0, -1),
@@ -164,6 +192,7 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
   redo: () => {
     const { past, future, nodes, edges } = get()
     if (future.length === 0) return
+    lastRemovalCommit.active = false
     const next = future[future.length - 1]
     set({
       future: future.slice(0, -1),
@@ -230,10 +259,29 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
   },
 
   onNodesChange: (changes) => {
-    const structural = changes.some(
-      (c) => c.type === 'remove' || (c.type === 'position' && c.dragging === false),
+    const removals = changes.filter(
+      (c) => c.type === 'remove',
     )
-    if (structural) get().commit()
+    if (removals.length > 0) {
+      // 节点删除与其悬挂连线清理必须原子化（单次快照），
+      // React Flow 会先派发连线移除再派发节点移除，用 commitRemoval 合并同一批次
+      get().commitRemoval()
+      set((s) => {
+        const remainingNodes = applyNodeChanges(changes, s.nodes)
+        const removedIds = new Set(removals.map((c) => c.id))
+        const remainingEdges = s.edges.filter(
+          (e) => !removedIds.has(e.source) && !removedIds.has(e.target),
+        )
+        return {
+          nodes: remainingNodes,
+          edges: remainingEdges,
+          dirty: true,
+          selectedNodeId:
+            removedIds.has(s.selectedNodeId ?? '') ? null : s.selectedNodeId,
+        }
+      })
+      return
+    }
     set((s) => ({
       nodes: applyNodeChanges(changes, s.nodes),
       dirty: s.dirty || changes.some((c) => c.type !== 'select'),
@@ -241,7 +289,24 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
   },
 
   onEdgesChange: (changes) => {
-    if (changes.some((c) => c.type === 'remove')) get().commit()
+    const removals = changes.filter((c) => c.type === 'remove')
+    if (removals.length > 0) {
+      const removedIds = new Set(removals.map((c) => c.id))
+      const actuallyRemoved = get().edges.some((e) => removedIds.has(e.id))
+      if (!actuallyRemoved) {
+        // 连线已随节点删除被清理：忽略冗余 remove，避免产生多余历史快照
+        const others = changes.filter((c) => c.type !== 'remove')
+        if (others.length === 0) return
+        set((s) => ({ edges: applyEdgeChanges(others, s.edges) }))
+        return
+      }
+      get().commitRemoval()
+      set((s) => ({
+        edges: applyEdgeChanges(changes, s.edges),
+        dirty: true,
+      }))
+      return
+    }
     set((s) => ({
       edges: applyEdgeChanges(changes, s.edges),
       dirty: s.dirty || changes.some((c) => c.type !== 'select'),
@@ -425,6 +490,12 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
   setPaletteOpen: (v) => set({ paletteOpen: v }),
   setLibraryOpen: (v) => set({ libraryOpen: v }),
   setTemplatesOpen: (v) => set({ templatesOpen: v }),
+  setSnapToGrid: (v) => set({ snapToGrid: v }),
   showToast: (type, message) => set({ toast: { type, message } }),
   clearToast: () => set({ toast: null }),
 }))
+
+/* 开发/自动化测试调试句柄（不影响生产逻辑） */
+if (typeof window !== 'undefined') {
+  ;(window as unknown as Record<string, unknown>).__canvasStore = useCanvasStore
+}
