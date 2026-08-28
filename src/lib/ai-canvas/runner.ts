@@ -65,6 +65,42 @@ type ProgressFn = (stage: string, progress: number) => void
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
+/**
+ * 瞬时错误（限流 / 服务端抖动）自动重试：
+ * 并行执行时多个节点同时发起请求，容易触发上游 429，此处带退避地重试。
+ */
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  opts: {
+    retries?: number
+    baseDelay?: number
+    label?: string
+    onRetry?: (stage: string, progress: number) => void
+  } = {},
+): Promise<T> {
+  const retries = opts.retries ?? 2
+  const baseDelay = opts.baseDelay ?? 2500
+  let lastErr: unknown
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn()
+    } catch (err) {
+      lastErr = err
+      const msg = err instanceof Error ? err.message : String(err)
+      const transient =
+        /429|rate.?limit|too many requests|5\d{2}|bad gateway|service unavailable/i.test(msg)
+      if (!transient || attempt === retries) throw err
+      const delay = baseDelay * (attempt + 1)
+      opts.onRetry?.(
+        `${opts.label ?? '请求'}受限，${Math.round(delay / 1000)}s 后自动重试（${attempt + 1}/${retries}）…`,
+        20,
+      )
+      await sleep(delay)
+    }
+  }
+  throw lastErr as Error
+}
+
 /** 将 16bit PCM 裸流包装为可播放的 WAV 文件 */
 function pcmToWav(
   pcm: Buffer,
@@ -350,16 +386,20 @@ async function runEnhancer(
   const target = str(io.params, 'target') || 'video'
   onProgress('正在分析创意…', 20)
   const zai = await ZAI.create()
-  const res = (await zai.chat.completions.create({
-    messages: [
-      {
-        role: 'system',
-        content:
-          '你是专业的 AI 视频提示词工程师，只输出扩写后的提示词本身，不要任何多余内容。',
-      },
-      { role: 'user', content: buildEnhancePrompt(text, style, target) },
-    ],
-  })) as {
+  const res = (await withRetry(
+    () =>
+      zai.chat.completions.create({
+        messages: [
+          {
+            role: 'system',
+            content:
+              '你是专业的 AI 视频提示词工程师，只输出扩写后的提示词本身，不要任何多余内容。',
+          },
+          { role: 'user', content: buildEnhancePrompt(text, style, target) },
+        ],
+      }),
+    { label: '提示词优化', onRetry: onProgress },
+  )) as {
     choices?: { message?: { content?: string } }[]
     content?: string
   }
@@ -384,10 +424,10 @@ async function runImageGen(
   const size = str(io.params, 'size') || '1024x576'
   onProgress('正在构思画面…', 15)
   const zai = await ZAI.create()
-  const res = await zai.images.generations.create({
-    prompt,
-    size: size as '1024x1024',
-  })
+  const res = await withRetry(
+    () => zai.images.generations.create({ prompt, size: size as '1024x1024' }),
+    { label: '图像生成', onRetry: onProgress },
+  )
   const b64 = res?.data?.[0]?.base64
   if (!b64) throw new Error('图像生成结果为空')
   onProgress('正在保存图像…', 85)
@@ -409,11 +449,15 @@ async function runImageEdit(
   const base64 = await imageToBase64(io.inputs.image.url)
   onProgress('AI 重绘中…', 35)
   const zai = await ZAI.create()
-  const res = await zai.images.generations.edit({
-    prompt,
-    image: base64,
-    ...(size && size !== 'auto' ? { size: size as '1024x1024' } : {}),
-  })
+  const res = await withRetry(
+    () =>
+      zai.images.generations.edit({
+        prompt,
+        image: base64,
+        ...(size && size !== 'auto' ? { size: size as '1024x1024' } : {}),
+      }),
+    { label: '图像重绘', onRetry: onProgress },
+  )
   const b64 = res?.data?.[0]?.base64
   if (!b64) throw new Error('图像重绘结果为空')
   onProgress('正在保存图像…', 85)
@@ -472,11 +516,15 @@ async function runTextToVideo(
   const withAudio = bool(io.params, 'withAudio')
   onProgress('正在提交视频任务…', 8)
   const zai = await ZAI.create()
-  const task = await zai.video.generations.create({
-    prompt,
-    quality: quality as 'speed' | 'quality',
-    with_audio: withAudio,
-  })
+  const task = await withRetry(
+    () =>
+      zai.video.generations.create({
+        prompt,
+        quality: quality as 'speed' | 'quality',
+        with_audio: withAudio,
+      }),
+    { label: '视频任务提交', onRetry: onProgress },
+  )
   const remoteUrl = await pollVideoTask(zai, task.id, onProgress)
   onProgress('正在下载视频…', 93)
   const url = await downloadTo(remoteUrl, 'video')
@@ -500,12 +548,16 @@ async function runImageToVideo(
   const b64 = await imageToBase64(io.inputs.image.url)
   onProgress('正在提交视频任务…', 10)
   const zai = await ZAI.create()
-  const task = await zai.video.generations.create({
-    prompt: prompt || undefined,
-    image_url: `data:image/png;base64,${b64}`,
-    quality: quality as 'speed' | 'quality',
-    with_audio: withAudio,
-  })
+  const task = await withRetry(
+    () =>
+      zai.video.generations.create({
+        prompt: prompt || undefined,
+        image_url: `data:image/png;base64,${b64}`,
+        quality: quality as 'speed' | 'quality',
+        with_audio: withAudio,
+      }),
+    { label: '视频任务提交', onRetry: onProgress },
+  )
   const remoteUrl = await pollVideoTask(zai, task.id, onProgress)
   onProgress('正在下载视频…', 93)
   const url = await downloadTo(remoteUrl, 'video')
@@ -631,8 +683,13 @@ async function runConcat(
 
   args.push('-filter_complex', filter.join(';'))
   args.push('-map', `[${vOut}]`, '-map', `[${aOut}]`)
+  // 快速预览档：superfast + 高 CRF，速度优先（约 2 倍速）；正式出片用 veryfast + crf20
+  const fast = bool(io.params, 'fastPreview')
   args.push(
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p',
+    '-c:v', 'libx264',
+    '-preset', fast ? 'superfast' : 'veryfast',
+    '-crf', fast ? '28' : '20',
+    '-pix_fmt', 'yuv420p',
     '-c:a', 'aac', '-b:a', '192k',
     '-movflags', '+faststart',
   )
@@ -654,6 +711,7 @@ async function runConcat(
     duration: fmtSec(outInfo.duration || total),
     segments: segs.length,
     transition: useFade ? transition : 'cut',
+    quality: fast ? 'preview' : 'final',
   }
   if (outInfo.width && outInfo.height) {
     meta.resolution = `${outInfo.width}x${outInfo.height}`
@@ -709,11 +767,15 @@ async function runTTS(
   const speed = num(io.params, 'speed')
   onProgress('正在合成语音…', 30)
   const zai = await ZAI.create()
-  const res = await zai.audio.tts.create({
-    input: text,
-    ...(voice ? { voice } : {}),
-    ...(speed ? { speed } : {}),
-  })
+  const res = await withRetry(
+    () =>
+      zai.audio.tts.create({
+        input: text,
+        ...(voice ? { voice } : {}),
+        ...(speed ? { speed } : {}),
+      }),
+    { label: '语音合成', onRetry: onProgress },
+  )
   onProgress('正在封装音频…', 80)
   const arrayBuffer = await res.arrayBuffer()
   const raw = Buffer.from(arrayBuffer)

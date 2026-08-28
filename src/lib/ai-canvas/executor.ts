@@ -58,9 +58,14 @@ function propagateOutputs(nodeId: string) {
     .forEach((e) => {
       const out = outs[e.sourceHandle ?? '']
       if (!out) return
-      updateNodeData(e.target, (d) => ({
-        inputs: { ...(d.inputs ?? {}), [e.targetHandle ?? '']: out },
-      }))
+      // 静默更新：输出传播属于状态恢复 / 运行同步，不标记用户编辑（避免误触自动保存）
+      updateNodeData(
+        e.target,
+        (d) => ({
+          inputs: { ...(d.inputs ?? {}), [e.targetHandle ?? '']: out },
+        }),
+        { dirty: false },
+      )
     })
 }
 
@@ -266,8 +271,11 @@ export async function runNode(nodeId: string): Promise<boolean> {
   }
 }
 
-/** 拓扑排序（Kahn） */
-function topoSort(nodes: Node<CanvasNodeData>[], edges: { source: string; target: string }[]): string[] | null {
+/**
+ * 拓扑分层：同一层内的节点互不依赖，可并行执行。
+ * 层号 = 最长上游路径长度（保证执行某层时其全部上游已完成）。
+ */
+function topoLevels(nodes: Node<CanvasNodeData>[], edges: { source: string; target: string }[]): string[][] | null {
   const indeg = new Map<string, number>()
   const adj = new Map<string, string[]>()
   nodes.forEach((n) => {
@@ -279,21 +287,68 @@ function topoSort(nodes: Node<CanvasNodeData>[], edges: { source: string; target
     adj.get(e.source)!.push(e.target)
     indeg.set(e.target, (indeg.get(e.target) ?? 0) + 1)
   })
-  const queue = nodes.filter((n) => (indeg.get(n.id) ?? 0) === 0).map((n) => n.id)
-  const order: string[] = []
-  while (queue.length > 0) {
-    const id = queue.shift()!
-    order.push(id)
-    for (const t of adj.get(id) ?? []) {
-      const d = (indeg.get(t) ?? 0) - 1
-      indeg.set(t, d)
-      if (d === 0) queue.push(t)
+  let frontier = nodes.filter((n) => (indeg.get(n.id) ?? 0) === 0).map((n) => n.id)
+  const levels: string[][] = []
+  let remaining = nodes.length
+  while (frontier.length > 0) {
+    levels.push(frontier)
+    remaining -= frontier.length
+    const next: string[] = []
+    for (const id of frontier) {
+      for (const t of adj.get(id) ?? []) {
+        const d = (indeg.get(t) ?? 0) - 1
+        indeg.set(t, d)
+        if (d === 0) next.push(t)
+      }
     }
+    frontier = next
   }
-  return order.length === nodes.length ? order : null
+  return remaining === 0 ? levels : null
 }
 
-/** 运行整个工作流 */
+/** 某节点沿连线方向的全部直接+间接下游 */
+function downstreamOf(startId: string, edges: { source: string; target: string }[]): Set<string> {
+  const adj = new Map<string, string[]>()
+  edges.forEach((e) => {
+    if (!adj.has(e.source)) adj.set(e.source, [])
+    adj.get(e.source)!.push(e.target)
+  })
+  const seen = new Set<string>()
+  const stack = [startId]
+  while (stack.length > 0) {
+    const cur = stack.pop()!
+    for (const t of adj.get(cur) ?? []) {
+      if (!seen.has(t)) {
+        seen.add(t)
+        stack.push(t)
+      }
+    }
+  }
+  return seen
+}
+
+/** 并发池：按上限并发执行任务，全部结束后统一返回结果 */
+async function runPool<T>(tasks: (() => Promise<T>)[], limit: number): Promise<PromiseSettledResult<T>[]> {
+  const results: PromiseSettledResult<T>[] = new Array(tasks.length)
+  let cursor = 0
+  const workers = Array.from({ length: Math.min(limit, tasks.length) }, async () => {
+    while (cursor < tasks.length) {
+      const idx = cursor++
+      try {
+        results[idx] = { status: 'fulfilled', value: await tasks[idx]() }
+      } catch (err) {
+        results[idx] = { status: 'rejected', reason: err }
+      }
+    }
+  })
+  await Promise.all(workers)
+  return results
+}
+
+/** 整图运行的最大并发度（AI 生成接口按 3 并发较为稳妥） */
+const MAX_PARALLEL = 3
+
+/** 运行整个工作流（拓扑分层 + 层内并行执行） */
 export async function runWorkflow() {
   const store = useCanvasStore.getState()
   const { nodes, edges, setRunning, setNodeRunState, showToast } = store
@@ -303,8 +358,8 @@ export async function runWorkflow() {
   }
   if (store.running) return
 
-  const order = topoSort(nodes, edges)
-  if (!order) {
+  const levels = topoLevels(nodes, edges)
+  if (!levels) {
     showToast('error', '图中存在循环连接，请检查')
     return
   }
@@ -316,32 +371,69 @@ export async function runWorkflow() {
   )
 
   const failedAt = new Set<string>()
-  for (let i = 0; i < order.length; i++) {
-    const id = order[i]
-    if (useCanvasStore.getState().runAbort) break
-    const node = useCanvasStore.getState().nodes.find((n) => n.id === id)
-    if (!node) continue
-    const spec = NODE_SPECS[node.type]
+  const skipSet = new Set<string>() // 失败节点的下游（含传递下游）
 
-    if (spec?.executable) {
-      setNodeRunState(id, 'queued', { stage: '排队中' })
-      const ok = await runNode(id)
-      if (!ok) {
-        // 标记所有后续节点为 skipped
-        order.slice(i + 1).forEach((rid) => {
+  for (let li = 0; li < levels.length; li++) {
+    if (useCanvasStore.getState().runAbort) break
+    const layer = levels[li]
+    const live = layer.filter((id) => !skipSet.has(id))
+
+    // 本层先处理非执行节点（纯数据派生，瞬时完成）
+    for (const id of live) {
+      const node = useCanvasStore.getState().nodes.find((n) => n.id === id)
+      if (!node) continue
+      const spec = NODE_SPECS[node.type]
+      if (!spec?.executable) {
+        setNodeRunState(id, 'success', { stage: '数据就绪', progress: 100 })
+        propagateOutputs(id)
+      }
+    }
+
+    // 可执行节点 → 并发池
+    const execIds = live.filter((id) => {
+      const node = useCanvasStore.getState().nodes.find((n) => n.id === id)
+      return node && NODE_SPECS[node.type]?.executable
+    })
+    if (execIds.length > 0) {
+      execIds.forEach((id) => setNodeRunState(id, 'queued', { stage: '排队中' }))
+      const results = await runPool(
+        execIds.map((id) => () => runNode(id)),
+        MAX_PARALLEL,
+      )
+      let layerFailed = false
+      results.forEach((r, idx) => {
+        const id = execIds[idx]
+        const ok = r.status === 'fulfilled' && r.value === true
+        if (!ok) {
+          const aborted = useCanvasStore.getState().runAbort
+          if (!aborted) {
+            layerFailed = true
+            failedAt.add(id)
+            downstreamOf(id, edges).forEach((d) => skipSet.add(d))
+          }
+        }
+      })
+      if (layerFailed) {
+        // 标记失败节点的全部下游为 skipped
+        skipSet.forEach((rid) => {
           const rn = useCanvasStore.getState().nodes.find((n) => n.id === rid)
-          if (rn && NODE_SPECS[rn.type ?? '']?.executable) {
+          if (rn && NODE_SPECS[rn.type ?? '']?.executable && rn.data.runState !== 'failed') {
             setNodeRunState(rid, 'skipped', { stage: '上游失败，已跳过' })
           }
         })
-        failedAt.add(id)
         break
       }
-    } else {
-      // 非执行节点：派生输出并传播（提示词就绪）
-      setNodeRunState(id, 'success', { stage: '数据就绪', progress: 100 })
-      propagateOutputs(id)
     }
+
+    // 被跳过的本层节点（上游失败）标记状态
+    layer
+      .filter((id) => skipSet.has(id))
+      .forEach((id) => {
+        const rn = useCanvasStore.getState().nodes.find((n) => n.id === id)
+        if (rn && NODE_SPECS[rn.type ?? '']?.executable) {
+          setNodeRunState(id, 'skipped', { stage: '上游失败，已跳过' })
+        }
+      })
   }
 
   // 刷新一次全图传播（处理手动连线后未传播的情况）

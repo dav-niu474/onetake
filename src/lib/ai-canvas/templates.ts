@@ -190,4 +190,52 @@ export const TEMPLATES: WorkflowTemplate[] = [
       ],
     }),
   },
+  {
+    id: 'storyboard',
+    name: '故事分镜 · 三幕成片',
+    description: '三段分镜并行生成 → 转场拼接 → AI 配音 → 合成出片',
+    tag: '大片推荐',
+    gradient: 'from-cyan-500/20 via-sky-500/10 to-transparent',
+    build: () => ({
+      nodes: [
+        /* 三幕分镜提示词 */
+        node('s1', 'prompt', 40, 60, {
+          text: '清晨的山间古道，云海在脚下翻涌，一位背背包的少年独自攀登，阳光穿透云层洒在石阶上，史诗感电影镜头',
+        }, '分镜一 · 登山'),
+        node('s2', 'prompt', 40, 380, {
+          text: '正午的古城集市，少年穿行在熙攘的人群中，红灯笼与霓虹招牌交错，镜头跟随式手持运镜，烟火气息',
+        }, '分镜二 · 探索'),
+        node('s3', 'prompt', 40, 700, {
+          text: '黄昏的山顶悬崖，少年张开双臂眺望远方连绵群山，金色夕阳染红云层，无人机环绕拉升大远景，壮阔收尾',
+        }, '分镜三 · 远望'),
+        /* 三段并行文生视频 */
+        node('tv1', 'textToVideo', 420, 40, { quality: 'quality', withAudio: false }),
+        node('tv2', 'textToVideo', 420, 360, { quality: 'quality', withAudio: false }),
+        node('tv3', 'textToVideo', 420, 680, { quality: 'quality', withAudio: false }),
+        /* 拼接 + 配音双轨 */
+        node('c1', 'concat', 820, 300, { transition: 'fade', transitionDuration: 0.8, fitMode: 'crop', fastPreview: false }, '三幕拼接'),
+        node('n1', 'prompt', 820, 700, {
+          text: '每一座山，都是一次成长的邀请。走过清晨的雾，穿过正午的城，我们终于在黄昏的顶端，遇见更辽阔的自己。',
+        }, '旁白文案'),
+        node('t1', 'tts', 1200, 680, { voice: 'tongtong', speed: 1 }, 'AI 配音'),
+        node('ap', 'audioPreview', 1560, 700),
+        /* 合成成片 */
+        node('m1', 'avMerge', 1200, 280, { keepOriginal: false, audioVolume: 1, durationMode: 'audio' }, '成片合成'),
+        node('vp', 'videoPreview', 1580, 300),
+      ],
+      edges: [
+        edge('s1', 'text', 'tv1', 'text'),
+        edge('s2', 'text', 'tv2', 'text'),
+        edge('s3', 'text', 'tv3', 'text'),
+        edge('tv1', 'video', 'c1', 'v1'),
+        edge('tv2', 'video', 'c1', 'v2'),
+        edge('tv3', 'video', 'c1', 'v3'),
+        edge('n1', 'text', 't1', 'text'),
+        edge('t1', 'audio', 'ap', 'audio'),
+        edge('t1', 'audio', 'm1', 'audio'),
+        edge('c1', 'video', 'm1', 'video'),
+        edge('m1', 'video', 'vp', 'video'),
+      ],
+    }),
+  },
 ]

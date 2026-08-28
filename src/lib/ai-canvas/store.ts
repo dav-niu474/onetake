@@ -93,6 +93,7 @@ export interface CanvasStore {
   updateNodeData: (
     id: string,
     patch: Partial<CanvasNodeData> | ((d: CanvasNodeData) => Partial<CanvasNodeData>),
+    options?: { dirty?: boolean },
   ) => void
   updateNodeParam: (id: string, key: string, value: unknown) => void
   setNodeRunState: (
@@ -400,14 +401,19 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
     set((s) => ({ nodes: [...s.nodes, copy], dirty: true }))
   },
 
-  updateNodeData: (id, patch) =>
+  /**
+   * options.dirty = false 时为「静默更新」：
+   * 运行输出回写 / 打开工作流时的传播属于状态恢复而非用户编辑，
+   * 不应触发自动保存（否则会产生"打开即保存"，与其他工作流切换叠加时会覆盖数据）
+   */
+  updateNodeData: (id, patch, options) =>
     set((s) => ({
       nodes: s.nodes.map((n) => {
         if (n.id !== id) return n
         const p = typeof patch === 'function' ? patch(n.data) : patch
         return { ...n, data: { ...n.data, ...p } }
       }),
-      dirty: true,
+      dirty: options?.dirty === false ? s.dirty : true,
     })),
 
   updateNodeParam: (id, key, value) =>

@@ -3,6 +3,7 @@
 /**
  * 右侧 Inspector 属性面板：选中单个节点时展示
  * 大屏参数编辑 / 端口连接状态 / 输出详情 / 运行信息 / 快捷操作
+ * 桌面端 → 右侧悬浮面板；移动端（<md）→ 底部抽屉
  */
 import { useMemo } from 'react'
 import {
@@ -17,6 +18,7 @@ import {
   CircleDashed,
   PlugZap,
   Info,
+  RefreshCw,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -30,6 +32,14 @@ import { useCanvasStore } from '@/lib/ai-canvas/store'
 import { runNode } from '@/lib/ai-canvas/executor'
 import { getAccent } from './nodes/accents'
 import { ParamControl } from './nodes/param-controls'
+import { useIsMobile } from '@/hooks/use-mobile'
+import {
+  Drawer,
+  DrawerContent,
+  DrawerDescription,
+  DrawerHeader,
+  DrawerTitle,
+} from '@/components/ui/drawer'
 import {
   Type,
   ImagePlus,
@@ -43,6 +53,8 @@ import {
   AudioLines,
   Volume2,
   Merge,
+  PackageOpen,
+  Layers,
 } from 'lucide-react'
 
 const ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -58,6 +70,25 @@ const ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   AudioLines,
   Volume2,
   Merge,
+  PackageOpen,
+  Layers,
+}
+
+/* ---------------- 素材引用节点：类型切换时的地址后缀校验 ---------------- */
+
+const EXT_BY_KIND: Record<string, string[]> = {
+  image: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'],
+  video: ['mp4', 'webm', 'mov', 'm4v'],
+  audio: ['wav', 'mp3', 'm4a', 'ogg', 'aac', 'flac'],
+}
+
+function kindOfUrl(url: string): string | null {
+  const m = url.split('?')[0].toLowerCase().match(/\.([a-z0-9]+)$/)
+  if (!m) return null
+  for (const [kind, exts] of Object.entries(EXT_BY_KIND)) {
+    if (exts.includes(m[1])) return kind
+  }
+  return null
 }
 
 function Section({
@@ -136,18 +167,17 @@ function OutputPreview({ output }: { output: NodeOutput }) {
   )
 }
 
-export function Inspector() {
-  /* 选中单个节点时展示面板 */
-  const node = useCanvasStore((s) => {
-    const sel = s.nodes.filter((n) => n.selected)
-    return sel.length === 1 ? sel[0] : null
-  })
+/* ---------------- 面板主体（桌面 / 移动端共用） ---------------- */
+
+function InspectorBody({ nodeId }: { nodeId: string }) {
+  const node = useCanvasStore((s) => s.nodes.find((n) => n.id === nodeId))
   const edges = useCanvasStore((s) => s.edges)
   const updateNodeData = useCanvasStore((s) => s.updateNodeData)
   const updateNodeParam = useCanvasStore((s) => s.updateNodeParam)
   const removeNode = useCanvasStore((s) => s.removeNode)
   const duplicateNode = useCanvasStore((s) => s.duplicateNode)
   const deselect = useCanvasStore((s) => s.onNodesChange)
+  const showToast = useCanvasStore((s) => s.showToast)
 
   const inEdges = useMemo(
     () => (node ? edges.filter((e) => e.target === node.id) : []),
@@ -174,11 +204,33 @@ export function Inspector() {
   const close = () =>
     deselect([{ id: node.id, type: 'select', selected: false }])
 
+  /** 参数变更：素材引用节点切换类型时校验地址后缀，不匹配则清空并提示 */
+  const handleParamChange = (key: string, value: unknown) => {
+    if (node.type === 'asset' && key === 'assetKind') {
+      const url = String(params.assetUrl ?? '')
+      if (url) {
+        const actual = kindOfUrl(url)
+        if (actual && actual !== value) {
+          updateNodeData(node.id, {
+            params: { ...params, assetKind: value, assetUrl: '', assetName: '' },
+            outputs: {},
+            runState: 'idle',
+            stage: undefined,
+            progress: 0,
+          })
+          showToast(
+            'error',
+            `当前素材是${DATA_KIND_META[actual as keyof typeof DATA_KIND_META]?.label ?? actual}，与新的「${DATA_KIND_META[value as keyof typeof DATA_KIND_META]?.label ?? String(value)}」类型不匹配，已清空地址，请重新从素材库插入`,
+          )
+          return
+        }
+      }
+    }
+    updateNodeParam(node.id, key, value)
+  }
+
   return (
-    <aside
-      className="absolute bottom-12 right-3 top-3 z-20 hidden w-[292px] flex-col overflow-hidden rounded-xl border border-zinc-700/70 bg-zinc-950/97 shadow-2xl backdrop-blur md:flex animate-in fade-in slide-in-from-right-3 duration-200"
-      nodrag=""
-    >
+    <>
       {/* 头部 */}
       <div className={cn('flex items-center gap-2 border-b border-zinc-800 bg-gradient-to-r px-3.5 py-3', accent.gradient)}>
         <span className={cn('flex h-7 w-7 shrink-0 items-center justify-center rounded-lg', accent.chipBg, accent.text)}>
@@ -238,7 +290,14 @@ export function Inspector() {
               className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 py-1.5 text-[11px] font-medium text-amber-200 transition hover:bg-amber-500/20"
             >
               <Play className="h-3 w-3" />
-              {runState === 'failed' ? '重试此节点' : '仅运行此节点'}
+              {runState === 'failed' ? (
+                <>
+                  <RefreshCw className="h-2.5 w-2.5" />
+                  重试此节点
+                </>
+              ) : (
+                '仅运行此节点'
+              )}
             </button>
           )}
         </Section>
@@ -251,10 +310,38 @@ export function Inspector() {
                 key={f.key}
                 field={f}
                 value={params[f.key]}
-                onChange={(v) => updateNodeParam(node.id, f.key, v)}
+                onChange={(v) => handleParamChange(f.key, v)}
                 disabled={runState === 'running'}
               />
             ))}
+          </Section>
+        )}
+
+        {/* 素材引用：当前素材预览 */}
+        {node.type === 'asset' && String(params.assetUrl ?? '') && (
+          <Section title="当前素材" icon={<PackageOpen className="h-3 w-3" />}>
+            {(() => {
+              const kind = String(params.assetKind ?? 'image')
+              const url = String(params.assetUrl)
+              if (kind === 'image') {
+                return <img src={url} alt={String(params.assetName ?? '素材')} className="w-full rounded-lg border border-zinc-700/60 object-cover" />
+              }
+              if (kind === 'video') {
+                return <video src={url} controls playsInline className="w-full rounded-lg border border-zinc-700/60 bg-black" />
+              }
+              if (kind === 'audio') {
+                return <audio src={url} controls className="h-8 w-full" />
+              }
+              return null
+            })()}
+            <a
+              href={String(params.assetUrl)}
+              download={String(params.assetName ?? '')}
+              className="flex items-center gap-1 text-[9px] text-zinc-400 transition hover:text-sky-300"
+            >
+              <Download className="h-2.5 w-2.5" />
+              下载原文件
+            </a>
           </Section>
         )}
 
@@ -290,8 +377,18 @@ export function Inspector() {
             {spec.outputs.map((out) => {
               const meta = DATA_KIND_META[out.kind]
               const connected = outEdges.some((e) => e.sourceHandle === out.id)
+              /* 素材引用节点仅激活与 assetKind 匹配的输出端口 */
+              const inactive =
+                node.type === 'asset' &&
+                out.kind !== String(params.assetKind ?? 'image')
               return (
-                <div key={out.id} className="flex items-center gap-2 rounded-lg border border-zinc-800/80 bg-zinc-900/50 px-2.5 py-1.5">
+                <div
+                  key={out.id}
+                  className={cn(
+                    'flex items-center gap-2 rounded-lg border border-zinc-800/80 bg-zinc-900/50 px-2.5 py-1.5',
+                    inactive && 'opacity-40',
+                  )}
+                >
                   <span className={cn('h-1.5 w-1.5 rounded-full', meta.dot)} />
                   <span className="text-[10px] text-zinc-300">{out.label}</span>
                   <span className="text-[8px] text-zinc-600">输出 · {meta.label}</span>
@@ -301,7 +398,7 @@ export function Inspector() {
                       connected ? 'bg-emerald-500/15 text-emerald-300' : 'bg-zinc-800 text-zinc-500',
                     )}
                   >
-                    {connected ? `已连 ${outEdges.filter((e) => e.sourceHandle === out.id).length} 项` : '未使用'}
+                    {inactive ? '未激活' : connected ? `已连 ${outEdges.filter((e) => e.sourceHandle === out.id).length} 项` : '未使用'}
                   </span>
                 </div>
               )
@@ -369,6 +466,63 @@ export function Inspector() {
           删除
         </button>
       </div>
+    </>
+  )
+}
+
+/* ---------------- 对外组件：桌面右侧面板 / 移动端底部抽屉 ---------------- */
+
+export function Inspector() {
+  const isMobile = useIsMobile()
+  /* 注意：zustand 选择器必须返回稳定引用（原始值），否则会触发无限循环渲染 */
+  const selectedCount = useCanvasStore((s) =>
+    s.nodes.reduce((acc, n) => acc + (n.selected ? 1 : 0), 0),
+  )
+  const firstSelectedId = useCanvasStore(
+    (s) => s.nodes.find((n) => n.selected)?.id ?? null,
+  )
+  const deselect = useCanvasStore((s) => s.onNodesChange)
+
+  /* 仅在恰好选中一个节点时展示面板 */
+  const nodeId = selectedCount === 1 ? firstSelectedId : null
+  const node = useCanvasStore((s) => (nodeId ? s.nodes.find((n) => n.id === nodeId) : null))
+  const spec = node ? NODE_SPECS[node.type ?? ''] : null
+  if (node && !spec) return null
+
+  if (isMobile) {
+    return (
+      <Drawer
+        open={!!nodeId}
+        onOpenChange={(open) => {
+          if (!open && nodeId) {
+            deselect([{ id: nodeId, type: 'select', selected: false }])
+          }
+        }}
+      >
+        <DrawerContent className="mx-auto max-h-[85dvh] w-full max-w-lg border-zinc-700/70 bg-zinc-950 px-0 outline-none sm:max-w-lg">
+          <DrawerHeader className="sr-only">
+            <DrawerTitle>节点属性</DrawerTitle>
+            <DrawerDescription>编辑选中节点的参数与输出</DrawerDescription>
+          </DrawerHeader>
+          {nodeId && (
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              <InspectorBody nodeId={nodeId} />
+            </div>
+          )}
+        </DrawerContent>
+      </Drawer>
+    )
+  }
+
+  /* 桌面端：仅在有选中节点时渲染 aside（避免空壳边框） */
+  if (!nodeId) return null
+
+  return (
+    <aside
+      className="absolute bottom-12 right-3 top-3 z-20 hidden w-[292px] flex-col overflow-hidden rounded-xl border border-zinc-700/70 bg-zinc-950/97 shadow-2xl backdrop-blur md:flex animate-in fade-in slide-in-from-right-3 duration-200"
+      nodrag=""
+    >
+      <InspectorBody nodeId={nodeId} />
     </aside>
   )
 }

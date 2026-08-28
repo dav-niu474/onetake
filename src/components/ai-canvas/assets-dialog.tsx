@@ -25,6 +25,11 @@ import {
   RefreshCw,
   UploadCloud,
   Loader2,
+  Search,
+  ArrowDownWideNarrow,
+  EyeOff,
+  Eye,
+  ImageOff,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/lib/ai-canvas/store'
@@ -38,6 +43,7 @@ interface AssetItem {
 }
 
 type KindFilter = 'all' | 'image' | 'video' | 'audio'
+type SortMode = 'newest' | 'oldest' | 'largest'
 
 const KIND_TABS: { key: KindFilter; label: string }[] = [
   { key: 'all', label: '全部' },
@@ -45,6 +51,15 @@ const KIND_TABS: { key: KindFilter; label: string }[] = [
   { key: 'video', label: '视频' },
   { key: 'audio', label: '音频' },
 ]
+
+const SORT_OPTIONS: { key: SortMode; label: string }[] = [
+  { key: 'newest', label: '最新优先' },
+  { key: 'oldest', label: '最早优先' },
+  { key: 'largest', label: '体积最大' },
+]
+
+/** 系统自动生成的视频首帧海报（poster_*）默认折叠，避免干扰浏览 */
+const isSystemPoster = (name: string) => name.startsWith('poster_')
 
 function fmtSize(n: number) {
   if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`
@@ -114,6 +129,9 @@ export function AssetsDialog() {
   const [loading, setLoading] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [filter, setFilter] = useState<KindFilter>('all')
+  const [query, setQuery] = useState('')
+  const [sort, setSort] = useState<SortMode>('newest')
+  const [showPosters, setShowPosters] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
 
   const refresh = async () => {
@@ -185,13 +203,29 @@ export function AssetsDialog() {
     }
   }
 
-  const filtered = filter === 'all' ? items : items.filter((i) => i.kind === filter)
+  /* 过滤：类型 + 系统海报开关 + 关键词；再按排序规则排列 */
+  const posterHidden = items.filter((i) => isSystemPoster(i.name) && !showPosters).length
+  const visibleItems = items.filter(
+    (i) => showPosters || !isSystemPoster(i.name),
+  )
   const counts = {
-    all: items.length,
-    image: items.filter((i) => i.kind === 'image').length,
-    video: items.filter((i) => i.kind === 'video').length,
-    audio: items.filter((i) => i.kind === 'audio').length,
+    all: visibleItems.length,
+    image: visibleItems.filter((i) => i.kind === 'image').length,
+    video: visibleItems.filter((i) => i.kind === 'video').length,
+    audio: visibleItems.filter((i) => i.kind === 'audio').length,
   }
+  const filtered = visibleItems
+    .filter((i) => filter === 'all' || i.kind === filter)
+    .filter((i) => {
+      const q = query.trim().toLowerCase()
+      if (!q) return true
+      return i.name.toLowerCase().includes(q)
+    })
+    .sort((a, b) => {
+      if (sort === 'oldest') return a.mtime - b.mtime
+      if (sort === 'largest') return b.size - a.size
+      return b.mtime - a.mtime
+    })
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -206,7 +240,7 @@ export function AssetsDialog() {
           </DialogDescription>
         </DialogHeader>
 
-        {/* 工具栏：筛选 + 上传 + 刷新 */}
+        {/* 工具栏：筛选 + 搜索 + 排序 + 上传 + 刷新 */}
         <div className="flex flex-wrap items-center gap-1.5">
           {KIND_TABS.map((t) => (
             <button
@@ -250,6 +284,50 @@ export function AssetsDialog() {
           </div>
         </div>
 
+        {/* 搜索 / 排序 / 系统海报开关 */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <div className="relative min-w-[150px] flex-1">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-zinc-500" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="搜索文件名…"
+              className="h-7 w-full rounded-md border border-zinc-800 bg-zinc-900/60 pl-7 pr-2 text-[11px] text-zinc-200 outline-none transition placeholder:text-zinc-600 focus:border-sky-500/50 focus:bg-zinc-900"
+            />
+          </div>
+          <div className="flex items-center overflow-hidden rounded-md border border-zinc-800">
+            {SORT_OPTIONS.map((o) => (
+              <button
+                key={o.key}
+                onClick={() => setSort(o.key)}
+                title={o.label}
+                className={cn(
+                  'flex h-7 items-center gap-1 border-l border-zinc-800 px-2 text-[10px] transition first:border-l-0',
+                  sort === o.key
+                    ? 'bg-zinc-800 text-zinc-100'
+                    : 'bg-zinc-900/60 text-zinc-500 hover:text-zinc-300',
+                )}
+              >
+                <ArrowDownWideNarrow className={cn('h-2.5 w-2.5', o.key === 'largest' && 'rotate-90')} />
+                {o.label}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={() => setShowPosters((v) => !v)}
+            title={showPosters ? '隐藏系统海报（视频首帧自动生成）' : '显示系统海报'}
+            className={cn(
+              'flex h-7 items-center gap-1 rounded-md border px-2 text-[10px] transition',
+              showPosters
+                ? 'border-sky-500/50 bg-sky-500/15 text-sky-200'
+                : 'border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200',
+            )}
+          >
+            {showPosters ? <Eye className="h-2.5 w-2.5" /> : <EyeOff className="h-2.5 w-2.5" />}
+            海报{!showPosters && posterHidden > 0 ? ` ${posterHidden}` : ''}
+          </button>
+        </div>
+
         <ScrollArea className="max-h-[420px] pr-2">
           {loading && items.length === 0 ? (
             <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
@@ -259,8 +337,26 @@ export function AssetsDialog() {
             </div>
           ) : filtered.length === 0 ? (
             <div className="flex flex-col items-center gap-2 py-12 text-zinc-600">
-              <PackageOpen className="h-8 w-8" />
-              <p className="text-xs">暂无素材，去画布生成或在上方上传</p>
+              {query.trim() || filter !== 'all' ? (
+                <>
+                  <ImageOff className="h-8 w-8" />
+                  <p className="text-xs">没有匹配的素材，试试调整筛选或关键词</p>
+                  <button
+                    onClick={() => {
+                      setQuery('')
+                      setFilter('all')
+                    }}
+                    className="mt-1 rounded-md border border-zinc-700 px-2.5 py-1 text-[10px] text-zinc-300 transition hover:border-zinc-500 hover:bg-zinc-800"
+                  >
+                    清除筛选条件
+                  </button>
+                </>
+              ) : (
+                <>
+                  <PackageOpen className="h-8 w-8" />
+                  <p className="text-xs">暂无素材，去画布生成或在上方上传</p>
+                </>
+              )}
             </div>
           ) : (
             <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">

@@ -256,10 +256,20 @@ function CanvasInner() {
     let timer: ReturnType<typeof setTimeout>
     const unsub = useCanvasStore.subscribe((s, prev) => {
       if (s.dirty && !prev?.dirty && s.workflow.id) {
+        // 捕获发起时刻的工作流 id：若到点时画布已切换为其他工作流，
+        // 绝不能用旧 id 保存新内容（会造成数据覆盖），直接放弃本次自动保存
+        const capturedId = s.workflow.id
         clearTimeout(timer)
         timer = setTimeout(() => {
           const st = useCanvasStore.getState()
-          if (st.dirty && !st.running && st.workflow.id) void saveWorkflow()
+          if (
+            st.dirty &&
+            !st.running &&
+            st.workflow.id &&
+            st.workflow.id === capturedId
+          ) {
+            void saveWorkflow()
+          }
         }, 1800)
       }
     })

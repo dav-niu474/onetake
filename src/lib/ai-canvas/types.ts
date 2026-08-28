@@ -557,6 +557,13 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
           { label: '以首段为准 · 裁剪填满', value: 'crop' },
         ],
       },
+      {
+        key: 'fastPreview',
+        label: '快速预览档',
+        type: 'switch',
+        defaultValue: false,
+        hint: '低码率快速合成（约快 2 倍），适合反复调试；导出成片前请关闭',
+      },
     ],
     executable: true,
     width: 300,
