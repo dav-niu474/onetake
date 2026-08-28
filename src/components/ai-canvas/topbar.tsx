@@ -61,9 +61,9 @@ export function TopBar() {
         </span>
         <div className="leading-tight">
           <p className="bg-gradient-to-r from-amber-200 via-orange-200 to-fuchsia-200 bg-clip-text text-[13px] font-bold tracking-wide text-transparent">
-            AI 视频创作画布
+            一镜 OneTake
           </p>
-          <p className="hidden text-[9px] text-zinc-500 sm:block">节点式 AI 视频工作流编排</p>
+          <p className="hidden text-[9px] text-zinc-500 sm:block">节点式 AI 视频创作画布 · 一镜到底一条过</p>
         </div>
       </div>
 

@@ -1,11 +1,16 @@
-# 🎬 AI 视频创作画布平台
+# 🎬 一镜 OneTake
 
-> 节点式 AI 视频创作工作流编排平台 — 参考 RunningHub / ComfyUI / 商汤 SEKO 的交互范式，从「提示词」到「成片」的全链路可视化创作。
+<div align="center">
+  <img src="docs/brand/banner.svg" alt="一镜 OneTake — 节点式 AI 视频创作画布" width="100%" />
+  <p><sub><b>一镜到底 · 一条过</b> —— 文案、画面、配音、剪辑，一张画布一条流，一镜到底出成片。</sub></p>
+</div>
+
+> 节点式 AI 视频创作画布平台 — 参考 RunningHub / ComfyUI / 商汤 SEKO 的交互范式，从「提示词」到「成片」的全链路可视化创作。
 
 **Node-based AI video creation canvas** — drag nodes, wire pipelines, and produce real AI-generated videos: prompt engineering → image/video generation → TTS voiceover → ffmpeg editing → final cut, all on one canvas.
 
 <p align="center">
-  <img src="docs/screenshot-canvas.png" alt="AI 视频创作画布" width="100%" />
+  <img src="docs/screenshot-canvas.png" alt="一镜 OneTake 画布全景" width="100%" />
 </p>
 
 <p align="center">
@@ -28,6 +33,22 @@
 - **💾 全链路持久化**：工作流 CRUD + 防抖自动保存（含竞态防护）+ 画布缩略图 + 刷新后输出恢复 + 远程任务找回（reclaim）
 - **🗂️ 素材库**：全部生成产物自动归类，搜索/排序/上传/重命名（级联更新画布引用）/删除（引用计数检查）/一键插入画布/导出归档
 - **📊 运行历史**：执行记录 + 耗时 + 错误 + 产物缩略图 + 画布快照迷你图（悬停联动高亮、点击定位节点）+ 一键重跑失败节点
+
+## 🐱 品牌与 IP：导演阿镜
+
+<div align="center">
+  <img src="docs/brand/mascot-ajing.svg" alt="导演阿镜 — 一镜 OneTake 吉祥物" width="320" />
+</div>
+
+**阿镜**（A-Jing），一镜 OneTake 的橘猫导演：
+
+- 🎩 **黑色贝雷帽 + 场记板**：场记板上写着「一镜 ONE TAKE」，片场最高指令——一条过
+- 🔌 **尾巴即连线**：尾巴末端是一根视频线缆插头——节点与节点之间的连接，就是阿镜的身体语言
+- 👁️ **光圈瞳孔**：眼睛里有相机光圈般的高光，随时在取景
+- 🟠 **琥珀同源**：橘猫毛色 = 画布运行态主色（amber），IP 与产品天然一体
+- 💬 **口头禅**：“一镜，一条过！” / “收工，That's a wrap~”
+
+> 品牌资产（SVG 矢量，可自由缩放）：`docs/brand/` — logo.svg / mascot-ajing.svg / banner.svg
 
 ## 🎛️ 节点体系（14 种）
 

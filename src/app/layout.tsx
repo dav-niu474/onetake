@@ -14,12 +14,12 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AI 视频创作画布 - 节点式工作流编排",
+  title: "一镜 OneTake — 节点式 AI 视频创作画布",
   description:
-    "参考 RunningHub / SEKO 的节点式画布设计，自由编排提示词、文生图、图生视频等 AI 节点，一站式创作 AI 视频。",
-  keywords: ["AI视频", "画布", "工作流", "文生视频", "图生视频", "节点编辑器"],
+    "一镜 OneTake：节点式 AI 视频创作画布。自由编排提示词、文生图、图生视频、AI 配音、拼接合成等节点，一镜到底，一条过。",
+  keywords: ["一镜", "OneTake", "AI视频", "节点画布", "工作流", "文生视频", "图生视频", "ComfyUI"],
   icons: {
-    icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
+    icon: "/onetake-logo.svg",
   },
 };
 
@@ -29,7 +29,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="zh-CN" suppressHydrationWarning>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
       >

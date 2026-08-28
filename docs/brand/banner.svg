@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 280" width="1200" height="280">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0D1119"/>
+      <stop offset="0.55" stop-color="#0B0E14"/>
+      <stop offset="1" stop-color="#12100B"/>
+    </linearGradient>
+    <linearGradient id="boardG" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1A2233"/>
+      <stop offset="1" stop-color="#111826"/>
+    </linearGradient>
+    <radialGradient id="glowL" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#F59E0B" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#F59E0B" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="280" fill="url(#bg)"/>
+  <ellipse cx="200" cy="150" rx="330" ry="180" fill="url(#glowL)"/>
+
+  <!-- ===== left: logo mark ===== -->
+  <g transform="translate(76,52) scale(0.73)">
+    <rect x="46" y="118" width="148" height="76" rx="13" fill="url(#boardG)" stroke="#2C3852" stroke-width="2.5"/>
+    <path d="M 108 138 L 146 156 L 108 174 Z" fill="#F59E0B" filter="url(#glow)"/>
+    <g transform="rotate(-12 120 118)">
+      <rect x="46" y="90" width="148" height="32" rx="9" fill="url(#boardG)" stroke="#2C3852" stroke-width="2.5"/>
+      <g stroke="#F59E0B" stroke-width="3">
+        <line x1="76" y1="106" x2="102" y2="106"/>
+        <line x1="116" y1="106" x2="142" y2="106"/>
+        <line x1="156" y1="106" x2="180" y2="106"/>
+      </g>
+      <g fill="#F59E0B" filter="url(#glow)">
+        <rect x="62" y="98" width="15" height="15" rx="4"/>
+        <rect x="101" y="98" width="15" height="15" rx="4"/>
+        <rect x="141" y="98" width="15" height="15" rx="4"/>
+        <rect x="179" y="98" width="15" height="15" rx="4"/>
+      </g>
+      <circle cx="52" cy="106" r="5" fill="#2C3852"/>
+    </g>
+  </g>
+
+  <!-- ===== center: wordmark ===== -->
+  <text x="300" y="140" font-family="'PingFang SC','Microsoft YaHei',sans-serif" font-weight="800" font-size="86" fill="#F8FAFC" letter-spacing="10">一镜</text>
+  <text x="302" y="182" font-family="Arial, sans-serif" font-weight="700" font-size="26" fill="#F59E0B" letter-spacing="12">ONETAKE</text>
+  <text x="302" y="222" font-family="'PingFang SC','Microsoft YaHei',sans-serif" font-size="20" fill="#9CA3AF" letter-spacing="3">节点式 AI 视频创作画布 —— 一镜到底 · 一条过</text>
+
+  <!-- ===== right: node-flow decoration ===== -->
+  <g stroke="#F59E0B" fill="none" opacity="0.35" stroke-width="2.5">
+    <path d="M 820 224 C 870 200, 850 96, 900 76"/>
+    <path d="M 900 76 C 970 62, 985 150, 1056 140"/>
+    <path d="M 900 76 C 930 40, 1000 40, 1040 58"/>
+  </g>
+  <g fill="#F59E0B" filter="url(#glow)">
+    <rect x="810" y="216" width="17" height="17" rx="5"/>
+    <rect x="891" y="67" width="17" height="17" rx="5"/>
+    <rect x="1048" y="132" width="17" height="17" rx="5"/>
+    <rect x="1032" y="50" width="15" height="15" rx="5" opacity="0.75"/>
+  </g>
+  <!-- clapper sparkle far right -->
+  <g transform="translate(1116,196) scale(0.34)" opacity="0.9">
+    <rect x="46" y="118" width="148" height="76" rx="13" fill="url(#boardG)" stroke="#2C3852" stroke-width="3"/>
+    <path d="M 108 138 L 146 156 L 108 174 Z" fill="#F59E0B"/>
+    <g transform="rotate(-12 120 118)">
+      <rect x="46" y="90" width="148" height="32" rx="9" fill="url(#boardG)" stroke="#2C3852" stroke-width="3"/>
+      <g fill="#F59E0B">
+        <rect x="62" y="98" width="15" height="15" rx="4"/>
+        <rect x="101" y="98" width="15" height="15" rx="4"/>
+        <rect x="141" y="98" width="15" height="15" rx="4"/>
+        <rect x="179" y="98" width="15" height="15" rx="4"/>
+      </g>
+    </g>
+  </g>
+
+  <line x1="40" y1="248" x2="1160" y2="248" stroke="#F59E0B" stroke-width="1.4" opacity="0.22"/>
+</svg>

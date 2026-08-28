@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240">
+  <defs>
+    <linearGradient id="boardG" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1A2233"/>
+      <stop offset="1" stop-color="#111826"/>
+    </linearGradient>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="3.2" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- faint node-wire backdrop -->
+  <g stroke="#F59E0B" stroke-width="2" fill="none" opacity="0.14">
+    <path d="M 30 200 C 80 170, 90 120, 60 70"/>
+    <path d="M 210 205 C 175 185, 168 150, 192 108"/>
+  </g>
+  <g fill="#F59E0B" opacity="0.20">
+    <circle cx="30" cy="200" r="5"/>
+    <circle cx="60" cy="70" r="4"/>
+    <circle cx="210" cy="205" r="5"/>
+    <circle cx="192" cy="108" r="4"/>
+  </g>
+
+  <!-- board body -->
+  <rect x="46" y="118" width="148" height="76" rx="13" fill="url(#boardG)" stroke="#2C3852" stroke-width="2.5"/>
+  <!-- play -->
+  <path d="M 108 138 L 146 156 L 108 174 Z" fill="#F59E0B" filter="url(#glow)"/>
+
+  <!-- clapper bar: nodes joined by wires -->
+  <g transform="rotate(-12 120 118)">
+    <rect x="46" y="90" width="148" height="32" rx="9" fill="url(#boardG)" stroke="#2C3852" stroke-width="2.5"/>
+    <g stroke="#F59E0B" stroke-width="3">
+      <line x1="76" y1="106" x2="102" y2="106"/>
+      <line x1="116" y1="106" x2="142" y2="106"/>
+      <line x1="156" y1="106" x2="180" y2="106"/>
+    </g>
+    <g fill="#F59E0B" filter="url(#glow)">
+      <rect x="62" y="98" width="15" height="15" rx="4"/>
+      <rect x="101" y="98" width="15" height="15" rx="4"/>
+      <rect x="141" y="98" width="15" height="15" rx="4"/>
+      <rect x="179" y="98" width="15" height="15" rx="4"/>
+    </g>
+    <circle cx="52" cy="106" r="5" fill="#2C3852"/>
+  </g>
+
+  <!-- spark -->
+  <g fill="#F59E0B">
+    <circle cx="204" cy="52" r="3" opacity="0.9"/>
+    <circle cx="188" cy="34" r="2" opacity="0.6"/>
+    <circle cx="36" cy="44" r="2.6" opacity="0.7"/>
+  </g>
+</svg>
