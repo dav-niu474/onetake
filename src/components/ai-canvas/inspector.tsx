@@ -315,18 +315,42 @@ function InspectorBody({ nodeId }: { nodeId: string }) {
           )}
         </Section>
 
-        {/* 参数 */}
+        {/* 参数（按子分组渲染：同组参数归入一个小节，多组时显示分组小标题） */}
         {spec.params.length > 0 && (
           <Section title="参数设置" icon={<Info className="h-3 w-3" />}>
-            {spec.params.map((f) => (
-              <ParamControl
-                key={f.key}
-                field={f}
-                value={params[f.key]}
-                onChange={(v) => handleParamChange(f.key, v)}
-                disabled={runState === 'running'}
-              />
-            ))}
+            {(() => {
+              /* 保持 spec.params 声明顺序，按 group 字段聚合 */
+              const groups: { name: string; fields: typeof spec.params }[] = []
+              for (const f of spec.params) {
+                const g = f.group ?? '参数'
+                const last = groups[groups.length - 1]
+                if (last && last.name === g) last.fields.push(f)
+                else groups.push({ name: g, fields: [f] })
+              }
+              const multi = groups.length > 1
+              return groups.map(({ name, fields }) => (
+                <div key={name} className="space-y-3">
+                  {multi && (
+                    <div className="flex items-center gap-1.5 pt-0.5">
+                      <span className="h-1 w-1 rounded-full bg-zinc-600" />
+                      <span className="text-[9px] font-semibold uppercase tracking-wider text-zinc-500">
+                        {name}
+                      </span>
+                      <span className="h-px flex-1 bg-zinc-800/80" />
+                    </div>
+                  )}
+                  {fields.map((f) => (
+                    <ParamControl
+                      key={f.key}
+                      field={f}
+                      value={params[f.key]}
+                      onChange={(v) => handleParamChange(f.key, v)}
+                      disabled={runState === 'running'}
+                    />
+                  ))}
+                </div>
+              ))
+            })()}
           </Section>
         )}
 

@@ -65,6 +65,8 @@ export interface ParamField {
   /** 参数变化是否会使下游结果失效 */
   affectsOutput?: boolean
   hint?: string
+  /** Inspector 中的子分组名（如「内容」「生成参数」「混音」）；不填归入默认组 */
+  group?: string
 }
 
 /* ---------------------------------- 运行状态 ---------------------------------- */
@@ -188,6 +190,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
         defaultValue: '',
         placeholder: '例：一只橘猫在洒满阳光的窗台上伸懒腰，胶片质感…',
         hint: '描述越具体，生成效果越好',
+        group: '内容',
       },
     ],
     executable: false,
@@ -222,6 +225,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
         type: 'select',
         defaultValue: 'auto',
         options: PROMPT_STYLE_OPTIONS,
+        group: '优化设置',
       },
       {
         key: 'target',
@@ -232,6 +236,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
           { label: '视频生成', value: 'video' },
           { label: '图像生成', value: 'image' },
         ],
+        group: '优化设置',
       },
     ],
     executable: true,
@@ -253,6 +258,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
         type: 'textarea',
         defaultValue: '',
         placeholder: '留空则使用上游提示词输入',
+        group: '内容',
       },
       {
         key: 'size',
@@ -260,6 +266,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
         type: 'select',
         defaultValue: '1024x576',
         options: IMAGE_SIZES,
+        group: '生成参数',
       },
     ],
     executable: true,
@@ -284,6 +291,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
         type: 'textarea',
         defaultValue: '',
         placeholder: '例：把背景改成黄昏的赛博都市',
+        group: '内容',
       },
       {
         key: 'size',
@@ -291,6 +299,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
         type: 'select',
         defaultValue: 'auto',
         options: [{ label: '跟随原图', value: 'auto' }, ...IMAGE_SIZES],
+        group: '生成参数',
       },
     ],
     executable: true,
@@ -312,6 +321,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
         type: 'textarea',
         defaultValue: '',
         placeholder: '留空则使用上游提示词输入',
+        group: '内容',
       },
       {
         key: 'quality',
@@ -322,12 +332,14 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
           { label: '极速', value: 'speed' },
           { label: '高清', value: 'quality' },
         ],
+        group: '生成参数',
       },
       {
         key: 'withAudio',
         label: '生成音轨',
         type: 'switch',
         defaultValue: false,
+        group: '生成参数',
       },
     ],
     executable: true,
@@ -352,6 +364,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
         type: 'textarea',
         defaultValue: '',
         placeholder: '例：镜头缓缓推进，人物微笑并挥手，发丝随风飘动',
+        group: '内容',
       },
       {
         key: 'quality',
@@ -362,12 +375,14 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
           { label: '极速', value: 'speed' },
           { label: '高清', value: 'quality' },
         ],
+        group: '生成参数',
       },
       {
         key: 'withAudio',
         label: '生成音轨',
         type: 'switch',
         defaultValue: false,
+        group: '生成参数',
       },
     ],
     executable: true,
@@ -415,6 +430,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
         type: 'textarea',
         defaultValue: '',
         placeholder: '留空则使用上游提示词输入',
+        group: '内容',
       },
       {
         key: 'voice',
@@ -427,6 +443,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
           { label: '女声', value: 'female' },
           { label: '男声', value: 'male' },
         ],
+        group: '语音设置',
       },
       {
         key: 'speed',
@@ -437,6 +454,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
         max: 1.5,
         step: 0.05,
         unit: 'x',
+        group: '语音设置',
       },
     ],
     executable: true,
@@ -460,6 +478,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
         label: '保留视频原声（与配音混音）',
         type: 'switch',
         defaultValue: false,
+        group: '混音',
       },
       {
         key: 'videoVolume',
@@ -470,6 +489,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
         max: 2,
         step: 0.1,
         unit: 'x',
+        group: '混音',
       },
       {
         key: 'audioVolume',
@@ -480,6 +500,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
         max: 2,
         step: 0.1,
         unit: 'x',
+        group: '混音',
       },
       {
         key: 'durationMode',
@@ -490,6 +511,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
           { label: '以视频为准（截去多余配音）', value: 'video' },
           { label: '以音频为准（延长画面）', value: 'audio' },
         ],
+        group: '时长',
       },
     ],
     executable: true,
@@ -535,6 +557,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
           { label: '上滑', value: 'slideup' },
           { label: '圆形展开', value: 'circleopen' },
         ],
+        group: '转场',
       },
       {
         key: 'transitionDuration',
@@ -546,6 +569,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
         step: 0.1,
         unit: 's',
         hint: '仅转场效果非「硬切」时生效',
+        group: '转场',
       },
       {
         key: 'fitMode',
@@ -556,6 +580,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
           { label: '以首段为准 · 留黑边', value: 'pad' },
           { label: '以首段为准 · 裁剪填满', value: 'crop' },
         ],
+        group: '画幅',
       },
       {
         key: 'fastPreview',
@@ -563,6 +588,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
         type: 'switch',
         defaultValue: false,
         hint: '低码率快速合成（约快 2 倍），适合反复调试；导出成片前请关闭',
+        group: '性能',
       },
     ],
     executable: true,
@@ -592,18 +618,21 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
           { label: '视频', value: 'video' },
           { label: '音频', value: 'audio' },
         ],
+        group: '素材',
       },
       {
         key: 'assetUrl',
         label: '素材地址',
         type: 'text',
         defaultValue: '',
+        group: '素材',
       },
       {
         key: 'assetName',
         label: '素材名称',
         type: 'text',
         defaultValue: '',
+        group: '素材',
       },
     ],
     executable: false,

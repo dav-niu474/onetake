@@ -5,7 +5,8 @@
  * 每条记录可展开「画布快照」：执行时刻的图布局迷你图（SVG 渲染，标记执行节点位置）
  * 支持按状态过滤（全部 / 成功 / 失败 / 运行中）
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useReactFlow } from '@xyflow/react'
 import {
   Dialog,
   DialogContent,
@@ -27,12 +28,21 @@ import {
   CloudDownload,
   Waypoints,
   Circle,
+  Play,
+  Volume2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/lib/ai-canvas/store'
 import { NODE_SPECS } from '@/lib/ai-canvas/types'
 import { runNode, reclaimNodeTask } from '@/lib/ai-canvas/executor'
 import { getAccent } from './nodes/accents'
+
+interface HistoryOutput {
+  kind?: string
+  url?: string
+  text?: string
+  meta?: Record<string, string | number>
+}
 
 interface HistoryItem {
   id: string
@@ -41,7 +51,7 @@ interface HistoryItem {
   status: string
   stage: string
   error: string | null
-  output: Record<string, { kind?: string; url?: string; text?: string }> | null
+  output: Record<string, HistoryOutput> | null
   remoteTaskId?: string | null
   snapshot: {
     focus?: string
@@ -87,11 +97,58 @@ interface SnapNode {
   state?: string
 }
 
+/**
+ * 快照迷你图（可交互）：
+ * - 悬停节点矩形：DOM 直操给真实画布节点加琥珀色光环（避免全节点重渲染）
+ * - 点击节点矩形：关闭对话框 + 选中并居中定位真实节点（不在画布时 toast 提示）
+ */
 function SnapshotThumb({
   snapshot,
+  onLocate,
 }: {
   snapshot: NonNullable<HistoryItem['snapshot']>
+  onLocate?: () => void
 }) {
+  const { setCenter, getZoom } = useReactFlow()
+  const hoverElRef = useRef<HTMLElement | null>(null)
+
+  const clearHighlight = () => {
+    hoverElRef.current?.classList.remove('snap-hover-highlight')
+    hoverElRef.current = null
+  }
+  useEffect(() => clearHighlight, [])
+
+  const highlightRealNode = (id: string | null) => {
+    clearHighlight()
+    if (!id) return
+    const el = document.querySelector(
+      `.react-flow__node[data-id="${CSS.escape(id)}"]`,
+    ) as HTMLElement | null
+    if (el) {
+      el.classList.add('snap-hover-highlight')
+      hoverElRef.current = el
+    }
+  }
+
+  const locateRealNode = (id: string) => {
+    const store = useCanvasStore.getState()
+    const n = store.nodes.find((x) => x.id === id)
+    if (!n) {
+      store.showToast('info', '该节点已不在当前画布上')
+      return
+    }
+    if (n.hidden) {
+      store.showToast('info', '该节点在折叠分组中，展开分组后即可查看')
+      return
+    }
+    onLocate?.()
+    store.onNodesChange([{ id, type: 'select', selected: true }])
+    void setCenter(n.position.x + 160, n.position.y + 60, {
+      zoom: Math.max(getZoom(), 0.85),
+      duration: 420,
+    })
+  }
+
   const layout = useMemo(() => {
     const nodes: SnapNode[] = snapshot.nodes ?? []
     if (nodes.length === 0) return null
@@ -133,85 +190,212 @@ function SnapshotThumb({
   const { nodes, edges, tx, ty, w, h, VW, VH } = layout
   const focus = snapshot.focus
   return (
-    <svg
-      viewBox={`0 0 ${VW} ${VH}`}
-      className="h-auto w-full select-none rounded-lg"
-      role="img"
-      aria-label="执行时刻画布快照"
-    >
-      {/* 连线 */}
-      {edges.map(([s, , t], i) => {
-        const sn = nodes.find((n) => n.id === s)
-        const tn = nodes.find((n) => n.id === t)
-        if (!sn || !tn) return null
-        const x1 = tx(sn.x) + w
-        const y1 = ty(sn.y) + h / 2
-        const x2 = tx(tn.x)
-        const y2 = ty(tn.y) + h / 2
-        const mx = (x1 + x2) / 2
-        const isFocusEdge = s === focus || t === focus
-        return (
-          <path
-            key={i}
-            d={`M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`}
-            fill="none"
-            stroke={isFocusEdge ? 'rgba(251,191,36,0.75)' : 'rgba(113,113,122,0.4)'}
-            strokeWidth={isFocusEdge ? 1.6 : 1}
-          />
-        )
-      })}
-      {/* 节点矩形 */}
-      {nodes.map((n) => {
-        const isFocus = n.id === focus
-        const fill =
-          SNAP_STATE_FILL[n.state ?? ''] ??
-          getAccent(NODE_SPECS[n.type]?.accent).hex ??
-          '#71717a'
-        return (
-          <g key={n.id}>
-            <rect
-              x={tx(n.x)}
-              y={ty(n.y)}
-              width={w}
-              height={h}
-              rx={4}
-              fill={fill}
-              fillOpacity={isFocus ? 0.95 : 0.55}
-              stroke={isFocus ? '#fde68a' : 'rgba(255,255,255,0.12)'}
-              strokeWidth={isFocus ? 1.8 : 0.8}
+    <div>
+      <svg
+        viewBox={`0 0 ${VW} ${VH}`}
+        className="h-auto w-full select-none rounded-lg"
+        role="img"
+        aria-label="执行时刻画布快照"
+        onMouseLeave={() => highlightRealNode(null)}
+      >
+        {/* 连线 */}
+        {edges.map(([s, , t], i) => {
+          const sn = nodes.find((n) => n.id === s)
+          const tn = nodes.find((n) => n.id === t)
+          if (!sn || !tn) return null
+          const x1 = tx(sn.x) + w
+          const y1 = ty(sn.y) + h / 2
+          const x2 = tx(tn.x)
+          const y2 = ty(tn.y) + h / 2
+          const mx = (x1 + x2) / 2
+          const isFocusEdge = s === focus || t === focus
+          return (
+            <path
+              key={i}
+              d={`M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`}
+              fill="none"
+              stroke={isFocusEdge ? 'rgba(251,191,36,0.75)' : 'rgba(113,113,122,0.4)'}
+              strokeWidth={isFocusEdge ? 1.6 : 1}
             />
-            {isFocus && (
-              <>
-                <rect
-                  x={tx(n.x) - 3}
-                  y={ty(n.y) - 3}
-                  width={w + 6}
-                  height={h + 6}
-                  rx={6}
-                  fill="none"
-                  stroke="rgba(251,191,36,0.45)"
-                  strokeWidth={1}
-                  strokeDasharray="3 3"
-                />
-                {n.label ? (
-                  <text
-                    x={tx(n.x) + w / 2}
-                    y={ty(n.y) - 7}
-                    textAnchor="middle"
-                    fill="#fcd34d"
-                    fontSize={9}
-                    fontWeight={600}
-                  >
-                    {n.label.slice(0, 12)}
-                  </text>
-                ) : null}
-              </>
-            )}
-          </g>
-        )
-      })}
-    </svg>
+          )
+        })}
+        {/* 节点矩形（可交互：hover 高亮真实节点 / 点击定位） */}
+        {nodes.map((n) => {
+          const isFocus = n.id === focus
+          const fill =
+            SNAP_STATE_FILL[n.state ?? ''] ??
+            getAccent(NODE_SPECS[n.type]?.accent).hex ??
+            '#71717a'
+          const specName = NODE_SPECS[n.type]?.name ?? n.type
+          const stateLabel =
+            n.state === 'running'
+              ? '运行中'
+              : n.state === 'success'
+                ? '成功'
+                : n.state === 'failed'
+                  ? '失败'
+                  : n.state === 'queued'
+                    ? '排队中'
+                    : '待运行'
+          return (
+            <g
+              key={n.id}
+              className="cursor-pointer transition-opacity hover:opacity-100"
+              opacity={isFocus ? 1 : 0.88}
+              onClick={() => locateRealNode(n.id)}
+              onMouseEnter={() => highlightRealNode(n.id)}
+            >
+              <title>
+                {`${n.label || specName}（${specName} · ${stateLabel}）— 点击定位到画布`}
+              </title>
+              <rect
+                x={tx(n.x)}
+                y={ty(n.y)}
+                width={w}
+                height={h}
+                rx={4}
+                fill={fill}
+                fillOpacity={isFocus ? 0.95 : 0.55}
+                stroke={isFocus ? '#fde68a' : 'rgba(255,255,255,0.12)'}
+                strokeWidth={isFocus ? 1.8 : 0.8}
+              />
+              {isFocus && (
+                <>
+                  <rect
+                    x={tx(n.x) - 3}
+                    y={ty(n.y) - 3}
+                    width={w + 6}
+                    height={h + 6}
+                    rx={6}
+                    fill="none"
+                    stroke="rgba(251,191,36,0.45)"
+                    strokeWidth={1}
+                    strokeDasharray="3 3"
+                  />
+                  {n.label ? (
+                    <text
+                      x={tx(n.x) + w / 2}
+                      y={ty(n.y) - 7}
+                      textAnchor="middle"
+                      fill="#fcd34d"
+                      fontSize={9}
+                      fontWeight={600}
+                    >
+                      {n.label.slice(0, 12)}
+                    </text>
+                  ) : null}
+                </>
+              )}
+            </g>
+          )
+        })}
+      </svg>
+      <p className="mt-1 text-right text-[8px] text-zinc-600">
+        悬停高亮画布节点 · 点击定位
+      </p>
+    </div>
   )
+}
+
+/* ---------------- 产物预览缩略图 ---------------- */
+
+/**
+ * 历史条目右侧的产物预览小缩略图：
+ * 图像直接展示；视频优先用 poster（无则用 preload=metadata 抓首帧）；文本展示截断片段。
+ * 点击在新标签页打开原文件。
+ */
+function OutputThumb({ out }: { out: HistoryOutput }) {
+  const [failed, setFailed] = useState(false)
+  if (out.kind === 'image' && out.url) {
+    return (
+      <a
+        href={out.url}
+        target="_blank"
+        rel="noreferrer"
+        className="group/th relative block h-10 w-[68px] shrink-0 overflow-hidden rounded-md border border-zinc-700/70"
+        title="点击查看原图"
+      >
+        <img
+          src={out.url}
+          alt="产物图像"
+          className="h-full w-full object-cover transition duration-200 group-hover/th:scale-110"
+          loading="lazy"
+        />
+        <span className="absolute inset-0 bg-sky-400/0 transition group-hover/th:bg-sky-400/15" />
+      </a>
+    )
+  }
+  if (out.kind === 'video' && out.url) {
+    const poster = out.meta?.poster ? String(out.meta.poster) : undefined
+    return (
+      <a
+        href={out.url}
+        target="_blank"
+        rel="noreferrer"
+        className="group/th relative block h-10 w-[68px] shrink-0 overflow-hidden rounded-md border border-zinc-700/70 bg-black"
+        title="点击播放视频"
+      >
+        {poster && !failed ? (
+          <img
+            src={poster}
+            alt="视频首帧"
+            className="h-full w-full object-cover opacity-90 transition duration-200 group-hover/th:scale-110"
+            loading="lazy"
+            onError={() => setFailed(true)}
+          />
+        ) : (
+          <video
+            src={`${out.url}#t=0.1`}
+            preload="metadata"
+            muted
+            playsInline
+            className="h-full w-full object-cover opacity-90"
+          />
+        )}
+        <span className="absolute inset-0 flex items-center justify-center">
+          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-black/55 backdrop-blur-sm ring-1 ring-white/25 transition group-hover/th:scale-110 group-hover/th:bg-amber-500/80">
+            <Play className="h-2.5 w-2.5 fill-zinc-100 text-zinc-100" />
+          </span>
+        </span>
+      </a>
+    )
+  }
+  if (out.kind === 'audio' && out.url) {
+    return (
+      <a
+        href={out.url}
+        target="_blank"
+        rel="noreferrer"
+        className="flex h-10 w-[68px] shrink-0 flex-col items-center justify-center gap-0.5 rounded-md border border-rose-500/25 bg-gradient-to-br from-rose-500/15 to-fuchsia-500/5 transition hover:border-rose-400/50"
+        title="点击播放音频"
+      >
+        <Volume2 className="h-3.5 w-3.5 text-rose-300" />
+        {/* 装饰性波形条 */}
+        <span className="flex h-2.5 items-end gap-[2px]">
+          {[6, 10, 4, 8, 5].map((h, i) => (
+            <span
+              key={i}
+              className="w-[2px] rounded-sm bg-rose-400/60"
+              style={{ height: `${h}px` }}
+            />
+          ))}
+        </span>
+      </a>
+    )
+  }
+  if (out.kind === 'text' && out.text) {
+    return (
+      <span
+        className="flex h-10 w-[68px] shrink-0 flex-col justify-center overflow-hidden rounded-md border border-emerald-500/25 bg-emerald-500/5 px-1.5"
+        title={out.text.slice(0, 160)}
+      >
+        <span className="line-clamp-3 text-[8px] leading-[1.35] text-emerald-300/80">
+          {out.text.slice(0, 80)}
+        </span>
+      </span>
+    )
+  }
+  return null
 }
 
 /* ---------------- 状态过滤 ---------------- */
@@ -395,6 +579,14 @@ export function HistoryDialog() {
                             : `${fmtTime(item.createdAt)} · 耗时 ${fmtDuration(item.durationMs)}`}
                         </p>
                       </div>
+                      {/* 产物预览缩略图（图像直接展示 / 视频首帧 / 音频波形 / 文本片段） */}
+                      {outputs.length > 0 && (
+                        <div className="flex shrink-0 items-center gap-1">
+                          {outputs.slice(0, 2).map((o, i) =>
+                            (o.url || o.text) ? <OutputThumb key={i} out={o} /> : null,
+                          )}
+                        </div>
+                      )}
                       <div className="flex shrink-0 items-center gap-1">
                         {item.snapshot?.nodes && item.snapshot.nodes.length > 0 && (
                           <button
@@ -487,7 +679,10 @@ export function HistoryDialog() {
                             本节点（{item.snapshot.focus?.slice(0, 10)}…）
                           </p>
                         </div>
-                        <SnapshotThumb snapshot={item.snapshot} />
+                        <SnapshotThumb
+                          snapshot={item.snapshot}
+                          onLocate={() => setOpen(false)}
+                        />
                       </div>
                     )}
                   </div>

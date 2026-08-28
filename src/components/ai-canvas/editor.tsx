@@ -3,7 +3,7 @@
 /**
  * AI 视频创作画布 —— 主编辑器
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Background,
   BackgroundVariant,
@@ -33,6 +33,14 @@ import {
   ChevronsLeft,
   ChevronsRight,
   FoldVertical,
+  PanelRight,
+  FolderInput,
+  FolderMinus,
+  AlignStartVertical,
+  AlignStartHorizontal,
+  AlignHorizontalDistributeCenter,
+  AlignVerticalDistributeCenter,
+  AlignHorizontalJustifyCenter,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { Node } from '@xyflow/react'
@@ -45,7 +53,7 @@ import {
   type CanvasNodeData,
 } from '@/lib/ai-canvas/types'
 import { useCanvasStore } from '@/lib/ai-canvas/store'
-import { runNode, runWorkflow, runGroup } from '@/lib/ai-canvas/executor'
+import { runNode, runWorkflow, runGroup, runSelected } from '@/lib/ai-canvas/executor'
 import { saveWorkflow, openWorkflow } from '@/lib/ai-canvas/persistence'
 import { getAccent } from './nodes/accents'
 import { GraphNode } from './nodes/graph-node'
@@ -187,6 +195,7 @@ function CanvasInner() {
   const clearToast = useCanvasStore((s) => s.clearToast)
 
   const [menu, setMenu] = useState<MenuState | null>(null)
+  const [nodeDragging, setNodeDragging] = useState(false)
   const selectedNodeCount = useCanvasStore(
     (s) => s.nodes.reduce((acc, n) => acc + (n.selected ? 1 : 0), 0),
   )
@@ -545,9 +554,13 @@ function CanvasInner() {
                 nodeId: node.id,
               })
             }}
-            onNodeDragStart={closeMenu}
+            onNodeDragStart={() => {
+              closeMenu()
+              setNodeDragging(true)
+            }}
             onNodeDrag={onNodeDrag}
             onNodeDragStop={(_e, node, draggedNodes) => {
+              setNodeDragging(false)
               // 单节点拖拽：落点最终吸附（防止 mouseup 原始位置覆盖拖拽中的吸附）
               if ((draggedNodes as unknown[]).length === 1) {
                 applyAlignment(node, useCanvasStore.getState().nodes)
@@ -620,6 +633,9 @@ function CanvasInner() {
           {/* 拖拽对齐参考线（overlay，pointer-events-none 不拦截事件） */}
           <AlignmentGuides />
 
+          {/* 多选浮动工具栏（Figma 式：编组 / 运行所选 / 批量加入分组 / 删除） */}
+          <MultiSelectToolbar dragging={nodeDragging} />
+
           {/* 右侧 Inspector 属性面板（选中单个节点时） */}
           <Inspector />
 
@@ -666,36 +682,16 @@ function CanvasInner() {
                   closeMenu={closeMenu}
                 />
               ) : menu.nodeId ? (
-                <>
-                  <p className="border-b border-zinc-800 px-3 pb-1.5 pt-1 text-[9px] uppercase tracking-wider text-zinc-600">
-                    节点操作
-                  </p>
-                  <MenuItem
-                    icon={<Play className="h-3.5 w-3.5 text-amber-300" />}
-                    label="仅运行此节点"
-                    onClick={() => {
-                      void runNode(menu.nodeId!)
-                      closeMenu()
-                    }}
-                  />
-                  <MenuItem
-                    icon={<Copy className="h-3.5 w-3.5" />}
-                    label="复制节点"
-                    onClick={() => {
-                      duplicateNode(menu.nodeId!)
-                      closeMenu()
-                    }}
-                  />
-                  <MenuItem
-                    icon={<Trash2 className="h-3.5 w-3.5 text-rose-300" />}
-                    label="删除节点"
-                    danger
-                    onClick={() => {
-                      removeNode(menu.nodeId!)
-                      closeMenu()
-                    }}
-                  />
-                </>
+                <NodeMenuItems
+                  nodeId={menu.nodeId}
+                  closeMenu={closeMenu}
+                  batchIds={
+                    selectedNodeCount > 1 &&
+                    useCanvasStore.getState().nodes.find((n) => n.id === menu.nodeId)?.selected
+                      ? useCanvasStore.getState().nodes.filter((n) => n.selected).map((n) => n.id)
+                      : []
+                  }
+                />
               ) : (
                 <>
                   {selectedNodeCount >= 2 && (
@@ -778,6 +774,518 @@ function MenuItem({
       className={cn(
         'flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] transition',
         danger ? 'text-rose-300 hover:bg-rose-500/15' : 'text-zinc-300 hover:bg-zinc-800',
+      )}
+    >
+      {icon}
+      {label}
+    </button>
+  )
+}
+
+/**
+ * 节点右键菜单：多选批量区（编组/运行所选/批量入组/删除所选） + 单节点区
+ * 分组加入/移出直接操作 groups（commit 入撤销栈），与拖拽同步同一套空组自动解散逻辑
+ */
+function NodeMenuItems({
+  nodeId,
+  closeMenu,
+  batchIds = [],
+}: {
+  nodeId: string
+  closeMenu: () => void
+  batchIds?: string[]
+}) {
+  const node = useCanvasStore((s) => s.nodes.find((n) => n.id === nodeId))
+  const groups = useCanvasStore((s) => s.groups)
+  if (!node) return null
+  const spec = NODE_SPECS[node.type ?? '']
+  const ownGroup = groups.find((g) => g.nodeIds.includes(nodeId))
+  const joinableGroups = groups.filter((g) => g.id !== ownGroup?.id)
+  const isBatch = batchIds.length > 1
+  const batchJoinable = groups.filter(
+    (g) => !batchIds.every((id) => g.nodeIds.includes(id)),
+  )
+
+  /** 加入/移出分组：直接变更 nodeIds，空组自动解散（可撤销） */
+  const mutateMembership = (target: 'remove' | string) => {
+    const st = useCanvasStore.getState()
+    st.commit()
+    let nextGroups = st.groups.map((g) => ({ ...g, nodeIds: [...g.nodeIds] }))
+    if (target === 'remove' && ownGroup) {
+      nextGroups = nextGroups
+        .map((g) =>
+          g.id === ownGroup.id
+            ? { ...g, nodeIds: g.nodeIds.filter((x) => x !== nodeId) }
+            : g,
+        )
+        .filter((g) => g.nodeIds.length > 0)
+      const dissolved = nextGroups.length < st.groups.length
+      useCanvasStore.setState({
+        groups: nextGroups,
+        selectedGroupId:
+          st.selectedGroupId === ownGroup.id && dissolved ? null : st.selectedGroupId,
+        dirty: true,
+      })
+      st.showToast('success', `已将「${node.data.label ?? spec?.name ?? nodeId}」移出「${ownGroup.name}」`)
+    } else if (target !== 'remove') {
+      const g = nextGroups.find((x) => x.id === target)
+      if (!g) return
+      // 先移出原有分组再加入新组（一个节点同时只属于一个分组）
+      nextGroups = nextGroups.map((x) => ({
+        ...x,
+        nodeIds: x.nodeIds.filter((id) => id !== nodeId),
+      }))
+      nextGroups = nextGroups
+        .map((x) => (x.id === target ? { ...x, nodeIds: [...x.nodeIds, nodeId] } : x))
+        .filter((x) => x.nodeIds.length > 0)
+      useCanvasStore.setState({ groups: nextGroups, dirty: true })
+      st.showToast('success', `已将「${node.data.label ?? spec?.name ?? nodeId}」加入「${g.name}」`)
+    }
+  }
+
+  return (
+    <>
+      <p className="truncate border-b border-zinc-800 px-3 pb-1.5 pt-1 text-[9px] uppercase tracking-wider text-zinc-600">
+        {isBatch ? `已选 ${batchIds.length} 个节点` : node.data.label ?? spec?.name ?? '节点操作'}
+      </p>
+      {/* 批量操作区（多选右键时置顶） */}
+      {isBatch && (
+        <>
+          <MenuItem
+            icon={<Boxes className="h-3.5 w-3.5 text-sky-300" />}
+            label={`将 ${batchIds.length} 个节点编组`}
+            onClick={() => {
+              useCanvasStore.getState().createGroupFromSelection()
+              closeMenu()
+            }}
+          />
+          <MenuItem
+            icon={<Play className="h-3.5 w-3.5 text-amber-300" />}
+            label={`运行所选（自动补齐上游）`}
+            onClick={() => {
+              void runSelected()
+              closeMenu()
+            }}
+          />
+          {batchJoinable.length > 0 && (
+            <div className="px-1.5 pb-0.5 pt-0.5">
+              <p className="px-1.5 pb-1 text-[9px] text-zinc-600">批量加入分组</p>
+              <div className={cn('space-y-0.5', batchJoinable.length > 4 && 'max-h-36 overflow-y-auto scrollbar-thin')}>
+                {batchJoinable.map((g) => {
+                  const c = getGroupColor(g.color)
+                  return (
+                    <button
+                      key={g.id}
+                      onClick={() => {
+                        addNodesToGroup(batchIds, g.id)
+                        closeMenu()
+                      }}
+                      className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-[11px] text-zinc-300 transition hover:bg-zinc-800"
+                    >
+                      <FolderInput className="h-3 w-3 text-emerald-300" />
+                      <span className={cn('h-1.5 w-1.5 rounded-full', c.dot)} />
+                      <span className="truncate">{g.name}</span>
+                      <span className="ml-auto text-[9px] text-zinc-600">{g.nodeIds.length}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+          <MenuItem
+            icon={<Trash2 className="h-3.5 w-3.5 text-rose-300" />}
+            label={`删除所选 ${batchIds.length} 个节点`}
+            danger
+            onClick={() => {
+              batchIds.forEach((id) => removeNode(id))
+              closeMenu()
+            }}
+          />
+          <div className="mx-2 my-1 h-px bg-zinc-800" />
+          <p className="px-3 pb-0.5 pt-0.5 text-[9px] text-zinc-600">
+            指向节点：{node.data.label ?? spec?.name}
+          </p>
+        </>
+      )}
+      {spec?.executable && !isBatch && (
+        <MenuItem
+          icon={<Play className="h-3.5 w-3.5 text-amber-300" />}
+          label="仅运行此节点"
+          onClick={() => {
+            void runNode(nodeId)
+            closeMenu()
+          }}
+        />
+      )}
+      <MenuItem
+        icon={<Copy className="h-3.5 w-3.5" />}
+        label="复制节点"
+        onClick={() => {
+          duplicateNode(nodeId)
+          closeMenu()
+        }}
+      />
+      <MenuItem
+        icon={<Pencil className="h-3.5 w-3.5 text-sky-300" />}
+        label="重命名"
+        onClick={() => {
+          const name = window.prompt('重命名节点', String(node.data.label ?? spec?.name ?? ''))
+          if (name && name.trim()) {
+            useCanvasStore.getState().updateNodeData(nodeId, { label: name.trim() })
+          }
+          closeMenu()
+        }}
+      />
+      <MenuItem
+        icon={<PanelRight className="h-3.5 w-3.5 text-teal-300" />}
+        label="属性面板"
+        onClick={() => {
+          useCanvasStore
+            .getState()
+            .onNodesChange([
+              ...useCanvasStore.getState().nodes.map((n) => ({ id: n.id, type: 'select' as const, selected: n.id === nodeId })),
+            ])
+          closeMenu()
+        }}
+      />
+      {/* 分组操作（单节点模式） */}
+      {!isBatch && (joinableGroups.length > 0 || ownGroup) && (
+        <div className="mx-2 my-1 h-px bg-zinc-800" />
+      )}
+      {!isBatch && joinableGroups.length > 0 && (
+        <div className="px-1.5 pb-0.5 pt-1">
+          <p className="px-1.5 pb-1 text-[9px] text-zinc-600">加入分组</p>
+          <div className={cn('space-y-0.5', joinableGroups.length > 4 && 'max-h-36 overflow-y-auto scrollbar-thin')}>
+            {joinableGroups.map((g) => {
+              const c = getGroupColor(g.color)
+              return (
+                <button
+                  key={g.id}
+                  onClick={() => {
+                    mutateMembership(g.id)
+                    closeMenu()
+                  }}
+                  className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-[11px] text-zinc-300 transition hover:bg-zinc-800"
+                >
+                  <FolderInput className="h-3 w-3 text-emerald-300" />
+                  <span className={cn('h-1.5 w-1.5 rounded-full', c.dot)} />
+                  <span className="truncate">{g.name}</span>
+                  <span className="ml-auto text-[9px] text-zinc-600">{g.nodeIds.length}</span>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
+      {!isBatch && ownGroup && (
+        <MenuItem
+          icon={<FolderMinus className="h-3.5 w-3.5 text-rose-300" />}
+          label={`移出「${ownGroup.name}」`}
+          onClick={() => {
+            mutateMembership('remove')
+            closeMenu()
+          }}
+        />
+      )}
+      {!isBatch && (
+        <>
+          <div className="mx-2 my-1 h-px bg-zinc-800" />
+          <MenuItem
+            icon={<Trash2 className="h-3.5 w-3.5 text-rose-300" />}
+            label="删除节点"
+            danger
+            onClick={() => {
+              removeNode(nodeId)
+              closeMenu()
+            }}
+          />
+        </>
+      )}
+    </>
+  )
+}
+
+/**
+ * 批量把节点加入分组：直接变更 nodeIds（commit 入撤销栈），
+ * 每个节点单归属——加入前先从原有分组移除，空组自动解散。
+ * 供多选工具栏 / 节点右键菜单共用。
+ */
+function addNodesToGroup(nodeIds: string[], groupId: string) {
+  const st = useCanvasStore.getState()
+  const g = st.groups.find((x) => x.id === groupId)
+  if (!g || nodeIds.length === 0) return
+  st.commit()
+  const idSet = new Set(nodeIds)
+  let nextGroups = st.groups.map((x) => ({
+    ...x,
+    nodeIds: x.nodeIds.filter((id) => !idSet.has(id)),
+  }))
+  nextGroups = nextGroups
+    .map((x) => (x.id === groupId ? { ...x, nodeIds: [...x.nodeIds, ...nodeIds] } : x))
+    .filter((x) => x.nodeIds.length > 0)
+  const dissolved = nextGroups.length < st.groups.length
+  useCanvasStore.setState({
+    groups: nextGroups,
+    selectedGroupId:
+      st.selectedGroupId && dissolved && !nextGroups.some((x) => x.id === st.selectedGroupId)
+        ? null
+        : st.selectedGroupId,
+    dirty: true,
+  })
+  st.showToast('success', `已将 ${nodeIds.length} 个节点加入「${g.name}」`)
+}
+
+/**
+ * 多选对齐/分布：左对齐 / 顶对齐 / 水平等距 / 垂直等距（Figma 式，commit 可撤销）
+ */
+function alignSelected(mode: 'left' | 'top' | 'hdist' | 'vdist') {
+  const st = useCanvasStore.getState()
+  const sel = st.nodes.filter((n) => n.selected)
+  if (sel.length < 2) return
+  st.commit()
+  const items = sel.map((n) => ({
+    id: n.id,
+    x: n.position.x,
+    y: n.position.y,
+    w: n.measured?.width ?? 300,
+    h: n.measured?.height ?? 120,
+  }))
+  const pos = new Map<string, { x: number; y: number }>(items.map((n) => [n.id, { x: n.x, y: n.y }]))
+  if (mode === 'left') {
+    const L = Math.min(...items.map((n) => n.x))
+    items.forEach((n) => pos.set(n.id, { x: L, y: n.y }))
+  } else if (mode === 'top') {
+    const T = Math.min(...items.map((n) => n.y))
+    items.forEach((n) => pos.set(n.id, { x: n.x, y: T }))
+  } else if (mode === 'hdist') {
+    if (items.length < 3) return
+    const sorted = [...items].sort((a, b) => a.x - b.x)
+    const first = sorted[0]
+    const last = sorted[sorted.length - 1]
+    const totalW = sorted.reduce((a, n) => a + n.w, 0)
+    const gap = (last.x + last.w - first.x - totalW) / (sorted.length - 1)
+    let cur = first.x
+    sorted.forEach((n) => {
+      pos.set(n.id, { x: Math.round(cur), y: n.y })
+      cur += n.w + gap
+    })
+  } else if (mode === 'vdist') {
+    if (items.length < 3) return
+    const sorted = [...items].sort((a, b) => a.y - b.y)
+    const first = sorted[0]
+    const last = sorted[sorted.length - 1]
+    const totalH = sorted.reduce((a, n) => a + n.h, 0)
+    const gap = (last.y + last.h - first.y - totalH) / (sorted.length - 1)
+    let cur = first.y
+    sorted.forEach((n) => {
+      pos.set(n.id, { x: n.x, y: Math.round(cur) })
+      cur += n.h + gap
+    })
+  }
+  st.onNodesChange(
+    [...pos.entries()].map(([id, position]) => ({ id, type: 'position' as const, position })),
+  )
+}
+
+/**
+ * 多选浮动工具栏（Figma 式）：选中 ≥2 个节点时浮现在选区上方，
+ * 提供编组 / 运行所选 / 批量加入分组 / 对齐分布 / 删除；拖拽过程中隐藏避免闪烁。
+ */
+function MultiSelectToolbar({ dragging }: { dragging: boolean }) {
+  const nodes = useCanvasStore((s) => s.nodes)
+  const groups = useCanvasStore((s) => s.groups)
+  const removeNode = useCanvasStore((s) => s.removeNode)
+  const transform = useStore((s) => s.transform)
+  const [groupMenuOpen, setGroupMenuOpen] = useState(false)
+  const [alignMenuOpen, setAlignMenuOpen] = useState(false)
+
+  const selected = useMemo(() => nodes.filter((n) => n.selected), [nodes])
+  const bounds = useMemo(() => {
+    if (selected.length < 2) return null
+    let minX = Infinity
+    let minY = Infinity
+    let maxX = -Infinity
+    let maxY = -Infinity
+    for (const n of selected) {
+      const w = n.measured?.width ?? 300
+      const h = n.measured?.height ?? 120
+      minX = Math.min(minX, n.position.x)
+      minY = Math.min(minY, n.position.y)
+      maxX = Math.max(maxX, n.position.x + w)
+      maxY = Math.max(maxY, n.position.y + h)
+    }
+    return { minX, minY, maxX, maxY }
+  }, [selected])
+
+  if (!bounds || dragging) return null
+  const [tx, ty, zoom] = transform
+  const left = bounds.minX * zoom + tx
+  const top = bounds.minY * zoom + ty - 46
+
+  const selectedIds = selected.map((n) => n.id)
+  const joinableGroups = groups.filter(
+    (g) => !selected.every((n) => g.nodeIds.includes(n.id)),
+  )
+
+  return (
+    <div
+      nodrag=""
+      className="absolute z-20 flex animate-in fade-in slide-in-from-bottom-1 items-center gap-0.5 rounded-xl border border-zinc-700/80 bg-zinc-900/95 p-1 shadow-2xl backdrop-blur duration-150"
+      style={{
+        left: Math.max(8, left),
+        top: Math.max(8, top),
+      }}
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <span className="px-1.5 text-[10px] font-medium text-zinc-500">
+        已选 {selected.length}
+      </span>
+      <div className="mx-0.5 h-4 w-px bg-zinc-800" />
+      <ToolButton
+        icon={<Boxes className="h-3.5 w-3.5" />}
+        label="编组"
+        tone="sky"
+        title={`将 ${selected.length} 个节点编组（Ctrl+G）`}
+        onClick={() => useCanvasStore.getState().createGroupFromSelection()}
+      />
+      <ToolButton
+        icon={<Play className="h-3.5 w-3.5" />}
+        label="运行所选"
+        tone="amber"
+        title="运行选中节点（自动补齐缺少输出的上游依赖）"
+        onClick={() => void runSelected()}
+      />
+      {joinableGroups.length > 0 && (
+        <div className="relative">
+          <ToolButton
+            icon={<FolderInput className="h-3.5 w-3.5" />}
+            label="加入分组"
+            tone="emerald"
+            title="把所选节点批量加入分组"
+            active={groupMenuOpen}
+            onClick={() => {
+              setGroupMenuOpen((v) => !v)
+              setAlignMenuOpen(false)
+            }}
+          />
+          {groupMenuOpen && (
+            <div className="absolute left-0 top-full z-30 mt-1.5 w-44 overflow-hidden rounded-lg border border-zinc-700/80 bg-zinc-900/97 py-1 shadow-2xl backdrop-blur">
+              <p className="px-2.5 pb-1 pt-0.5 text-[9px] uppercase tracking-wider text-zinc-600">
+                加入到…
+              </p>
+              {joinableGroups.map((g) => {
+                const c = getGroupColor(g.color)
+                return (
+                  <button
+                    key={g.id}
+                    onClick={() => {
+                      addNodesToGroup(selectedIds, g.id)
+                      setGroupMenuOpen(false)
+                    }}
+                    className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] text-zinc-300 transition hover:bg-zinc-800"
+                  >
+                    <span className={cn('h-1.5 w-1.5 rounded-full', c.dot)} />
+                    <span className="truncate">{g.name}</span>
+                    <span className="ml-auto text-[9px] text-zinc-600">{g.nodeIds.length}</span>
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
+      <div className="mx-0.5 h-4 w-px bg-zinc-800" />
+      {/* 对齐 / 分布 */}
+      <div className="relative">
+        <ToolButton
+          icon={<AlignHorizontalJustifyCenter className="h-3.5 w-3.5" />}
+          label="对齐"
+          tone="sky"
+          title="对齐与分布"
+          active={alignMenuOpen}
+          onClick={() => {
+            setAlignMenuOpen((v) => !v)
+            setGroupMenuOpen(false)
+          }}
+        />
+        {alignMenuOpen && (
+          <div className="absolute left-0 top-full z-30 mt-1.5 w-40 overflow-hidden rounded-lg border border-zinc-700/80 bg-zinc-900/97 py-1 shadow-2xl backdrop-blur">
+            {([
+              { mode: 'left', label: '左对齐', icon: <AlignStartVertical className="h-3.5 w-3.5 text-sky-300" /> },
+              { mode: 'top', label: '顶对齐', icon: <AlignStartHorizontal className="h-3.5 w-3.5 text-sky-300" /> },
+              { mode: 'hdist', label: '水平等距分布', icon: <AlignHorizontalDistributeCenter className="h-3.5 w-3.5 text-sky-300" />, disabled: selected.length < 3 },
+              { mode: 'vdist', label: '垂直等距分布', icon: <AlignVerticalDistributeCenter className="h-3.5 w-3.5 text-sky-300" />, disabled: selected.length < 3 },
+            ] as { mode: 'left' | 'top' | 'hdist' | 'vdist'; label: string; icon: React.ReactNode; disabled?: boolean }[]).map(
+              ({ mode, label, icon, disabled }) => (
+                <button
+                  key={mode}
+                  disabled={disabled}
+                  onClick={() => {
+                    alignSelected(mode)
+                    setAlignMenuOpen(false)
+                  }}
+                  className={cn(
+                    'flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[11px] transition',
+                    disabled
+                      ? 'cursor-not-allowed text-zinc-700'
+                      : 'text-zinc-300 hover:bg-zinc-800',
+                  )}
+                  title={disabled ? '等距分布需要至少 3 个节点' : undefined}
+                >
+                  {icon}
+                  {label}
+                </button>
+              ),
+            )}
+          </div>
+        )}
+      </div>
+      <div className="mx-0.5 h-4 w-px bg-zinc-800" />
+      <ToolButton
+        icon={<Trash2 className="h-3.5 w-3.5" />}
+        label="删除"
+        tone="rose"
+        danger
+        title={`删除所选 ${selected.length} 个节点（可撤销）`}
+        onClick={() => {
+          selectedIds.forEach((id) => removeNode(id))
+        }}
+      />
+    </div>
+  )
+}
+
+function ToolButton({
+  icon,
+  label,
+  tone,
+  title,
+  onClick,
+  danger,
+  active,
+}: {
+  icon: React.ReactNode
+  label: string
+  tone: 'sky' | 'amber' | 'emerald' | 'rose'
+  title: string
+  onClick: () => void
+  danger?: boolean
+  active?: boolean
+}) {
+  const tones: Record<string, string> = {
+    sky: 'text-sky-300 hover:bg-sky-500/15',
+    amber: 'text-amber-300 hover:bg-amber-500/15',
+    emerald: 'text-emerald-300 hover:bg-emerald-500/15',
+    rose: 'text-rose-300 hover:bg-rose-500/15',
+  }
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      className={cn(
+        'flex items-center gap-1 rounded-lg px-2 py-1.5 text-[11px] font-medium transition',
+        danger ? 'text-rose-300 hover:bg-rose-500/15' : tones[tone],
+        active && 'bg-zinc-800',
       )}
     >
       {icon}

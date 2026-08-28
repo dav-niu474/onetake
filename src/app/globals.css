@@ -200,3 +200,12 @@
 .react-flow__renderer .scrollbar-thin::-webkit-scrollbar-thumb {
   background: #3f3f46;
 }
+
+/* 历史快照迷你图：悬停高亮真实画布节点（DOM 直操，避免全节点重渲染） */
+.snap-hover-highlight > div {
+  box-shadow:
+    0 0 0 2px rgba(251, 191, 36, 0.9),
+    0 0 28px -2px rgba(251, 191, 36, 0.55) !important;
+  border-radius: 14px;
+  transition: box-shadow 0.15s ease;
+}

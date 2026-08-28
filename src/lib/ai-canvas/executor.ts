@@ -562,6 +562,20 @@ export async function runGroup(groupId: string) {
 }
 
 /**
+ * 运行当前选中的节点（多选批量执行）：
+ * 与分组运行同一作用域语义——自动补齐缺少输出的上游依赖，已就绪上游复用。
+ */
+export async function runSelected() {
+  const { nodes } = useCanvasStore.getState()
+  const coreIds = nodes.filter((n) => n.selected).map((n) => n.id)
+  if (coreIds.length === 0) {
+    useCanvasStore.getState().showToast('info', '请先选中要运行的节点')
+    return
+  }
+  await runScope(coreIds, `所选 ${coreIds.length} 节点`)
+}
+
+/**
  * 作用域运行引擎：
  * - coreIds = null：全图运行（重置全部节点状态，行为与旧版 runWorkflow 一致）
  * - coreIds = [...]：仅运行这些节点（含缺少输出的上游依赖补齐），
