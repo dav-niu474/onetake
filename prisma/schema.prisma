@@ -30,6 +30,8 @@ model Execution {
   status     String    @default("running")
   progress   Int       @default(0)
   stage      String    @default("")
+  // 远端异步任务 ID（视频生成等）：超时/中断后可凭此找回云端成果
+  remoteTaskId String?
   // 输入快照
   input      String    @default("{}")
   params     String    @default("{}")

@@ -293,6 +293,60 @@ export async function runNode(nodeId: string): Promise<boolean> {
 }
 
 /**
+ * 找回远端视频任务（超时/中断场景）：
+ * 服务端凭 remoteTaskId 查询云端任务状态，成功则下载成片并回填节点输出。
+ */
+export async function reclaimNodeTask(nodeId: string): Promise<boolean> {
+  const { nodes, workflow, setNodeRunState } = useCanvasStore.getState()
+  const node = nodes.find((n) => n.id === nodeId)
+  if (!node) return false
+  const start = Date.now()
+  setNodeRunState(nodeId, 'running', {
+    stage: '正在找回云端任务…',
+    progress: 10,
+    error: undefined,
+  })
+  try {
+    const res = await fetch('/api/executions/reclaim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        workflowId: workflow.id,
+        nodeId,
+        waitMs: 150000, // 最长等待 2.5 分钟云端完成
+      }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data.error || '找回请求失败')
+    if (data.status === 'success' && data.output) {
+      applyOutputs(nodeId, data.output, Date.now() - start)
+      useCanvasStore.getState().showToast('success', '云端任务找回成功，视频已回填节点')
+      return true
+    }
+    if (data.status === 'failed') {
+      throw new Error(data.error || '云端任务失败')
+    }
+    // 仍在运行：保持 failed 态（保留找回按钮），提示稍后再试
+    setNodeRunState(nodeId, 'failed', {
+      stage: '失败',
+      error: `云端任务仍在生成中（已等待 ${data.elapsed ?? '?'}s），稍后可再次找回`,
+      durationMs: Date.now() - start,
+    })
+    useCanvasStore.getState().showToast('info', '云端任务尚未完成，稍后可再次点击找回')
+    return false
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    setNodeRunState(nodeId, 'failed', {
+      stage: '失败',
+      error: msg,
+      durationMs: Date.now() - start,
+    })
+    useCanvasStore.getState().showToast('error', `找回失败：${msg}`)
+    return false
+  }
+}
+
+/**
  * 拓扑分层：同一层内的节点互不依赖，可并行执行。
  * 层号 = 最长上游路径长度（保证执行某层时其全部上游已完成）。
  */

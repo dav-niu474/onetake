@@ -503,12 +503,15 @@ async function pollVideoTask(
       throw new Error('视频生成失败，请调整提示词后重试')
     }
   }
-  throw new Error('视频生成超时（10 分钟），请稍后重试或使用极速模式')
+  throw new Error(
+    '视频生成超时（10 分钟）：云端任务可能仍在进行，可通过「找回任务」恢复成果',
+  )
 }
 
 async function runTextToVideo(
   io: ExecIO,
   onProgress: ProgressFn,
+  onRemoteTask?: (taskId: string) => void,
 ): Promise<Record<string, { kind: string; url?: string; text?: string }>> {
   const prompt = str(io.params, 'prompt') || io.inputs.text?.text || ''
   if (!prompt) throw new Error('缺少提示词：请连接提示词节点或在节点内填写')
@@ -516,18 +519,29 @@ async function runTextToVideo(
   const withAudio = bool(io.params, 'withAudio')
   onProgress('正在提交视频任务…', 8)
   const zai = await ZAI.create()
-  const task = await withRetry(
-    () =>
-      zai.video.generations.create({
-        prompt,
-        quality: quality as 'speed' | 'quality',
-        with_audio: withAudio,
-      }),
-    // 视频任务提交限流严格：实测不仅限并发（同账号同时仅 1 个活跃任务），
-    // 还有分钟级时间窗配额 —— 串行单独提交仍会 429，且窗口可超过 100s（Task 8 实证）。
-    // 重试 6 次、15s 线性退避（15/30/45/60/75/90s，总窗口 ≈5min）适配长配额窗口
-    { retries: 6, baseDelay: 15000, label: '视频任务提交', onRetry: onProgress },
-  )
+  let task
+  try {
+    task = await withRetry(
+      () =>
+        zai.video.generations.create({
+          prompt,
+          quality: quality as 'speed' | 'quality',
+          with_audio: withAudio,
+        }),
+      // 视频提交限流严格：同账号同时仅 1 个活跃任务 + 分钟级时间窗配额。
+      // 快速失败策略：3 次 / 8s 线性退避（总窗口 ≈ 24s），避免整图运行被长退避阻塞
+      { retries: 3, baseDelay: 8000, label: '视频任务提交', onRetry: onProgress },
+    )
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (/429|too many/i.test(msg)) {
+      throw new Error(
+        '视频生成配额受限（同账号同时仅 1 个活跃任务 + 分钟级提交配额）。请稍候 1-2 分钟后重试；若此前有任务曾显示「生成中」，可点「找回任务」恢复其成果',
+      )
+    }
+    throw err
+  }
+  onRemoteTask?.(task.id)
   const remoteUrl = await pollVideoTask(zai, task.id, onProgress)
   onProgress('正在下载视频…', 93)
   const url = await downloadTo(remoteUrl, 'video')
@@ -542,6 +556,7 @@ async function runTextToVideo(
 async function runImageToVideo(
   io: ExecIO,
   onProgress: ProgressFn,
+  onRemoteTask?: (taskId: string) => void,
 ): Promise<Record<string, { kind: string; url?: string; text?: string }>> {
   if (!io.inputs.image?.url) throw new Error('缺少图像输入：请连接上游图像')
   const prompt = str(io.params, 'prompt') || io.inputs.text?.text || ''
@@ -551,18 +566,29 @@ async function runImageToVideo(
   const b64 = await imageToBase64(io.inputs.image.url)
   onProgress('正在提交视频任务…', 10)
   const zai = await ZAI.create()
-  const task = await withRetry(
-    () =>
-      zai.video.generations.create({
-        prompt: prompt || undefined,
-        image_url: `data:image/png;base64,${b64}`,
-        quality: quality as 'speed' | 'quality',
-        with_audio: withAudio,
-      }),
-    // 同 runTextToVideo：提交阶段限流严格（并发 + 分钟级时间窗双重配额），
-    // 加强重试（15/30/45/60/75/90s，总窗口 ≈5min）
-    { retries: 6, baseDelay: 15000, label: '视频任务提交', onRetry: onProgress },
-  )
+  let task
+  try {
+    task = await withRetry(
+      () =>
+        zai.video.generations.create({
+          prompt: prompt || undefined,
+          image_url: `data:image/png;base64,${b64}`,
+          quality: quality as 'speed' | 'quality',
+          with_audio: withAudio,
+        }),
+      // 同 runTextToVideo：快速失败（3 次 / 8s 线性退避 ≈ 24s 窗口），避免阻塞整图运行
+      { retries: 3, baseDelay: 8000, label: '视频任务提交', onRetry: onProgress },
+    )
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (/429|too many/i.test(msg)) {
+      throw new Error(
+        '视频生成配额受限（同账号同时仅 1 个活跃任务 + 分钟级提交配额）。请稍候 1-2 分钟后重试；若此前有任务曾显示「生成中」，可点「找回任务」恢复其成果',
+      )
+    }
+    throw err
+  }
+  onRemoteTask?.(task.id)
   const remoteUrl = await pollVideoTask(zai, task.id, onProgress)
   onProgress('正在下载视频…', 93)
   const url = await downloadTo(remoteUrl, 'video')
@@ -806,6 +832,7 @@ export async function executeNode(
   nodeType: string,
   io: ExecIO,
   onProgress: ProgressFn,
+  onRemoteTask?: (taskId: string) => void,
 ): Promise<Record<string, { kind: string; url?: string; text?: string }>> {
   switch (nodeType) {
     case 'enhancer':
@@ -815,9 +842,9 @@ export async function executeNode(
     case 'imageEdit':
       return runImageEdit(io, onProgress)
     case 'textToVideo':
-      return runTextToVideo(io, onProgress)
+      return runTextToVideo(io, onProgress, onRemoteTask)
     case 'imageToVideo':
-      return runImageToVideo(io, onProgress)
+      return runImageToVideo(io, onProgress, onRemoteTask)
     case 'tts':
       return runTTS(io, onProgress)
     case 'avMerge':
@@ -826,5 +853,66 @@ export async function executeNode(
       return runConcat(io, onProgress)
     default:
       throw new Error(`节点类型 ${nodeType} 不可执行`)
+  }
+}
+
+/* ------------------------------ 远程任务找回 ------------------------------ */
+
+export interface ReclaimResult {
+  status: 'success' | 'failed' | 'running'
+  output?: Record<string, { kind: string; url?: string; text?: string }>
+  error?: string
+  /** 远端任务仍在进行时返回已等待秒数 */
+  elapsed?: number
+}
+
+/**
+ * 查询远端视频任务状态；可选等待其完成（等待模式下每 5s 轮询一次）。
+ * - success：下载成片 + 首帧海报，返回可直接回填节点的 outputs
+ * - failed：返回远端失败信息
+ * - running：返回已等待时间（仅在非等待模式 / 等待超时后）
+ */
+export async function reclaimRemoteVideoTask(
+  taskId: string,
+  opts: { waitMs?: number; onProgress?: ProgressFn } = {},
+): Promise<ReclaimResult> {
+  const zai = await ZAI.create()
+  const start = Date.now()
+  const waitMs = opts.waitMs ?? 0
+  for (;;) {
+    let r
+    try {
+      r = await zai.async.result.query(taskId)
+    } catch {
+      if (Date.now() - start > Math.max(waitMs, 15000)) {
+        return { status: 'running', elapsed: Math.round((Date.now() - start) / 1000) }
+      }
+      await sleep(4000)
+      continue
+    }
+    if (r?.task_status === 'SUCCESS') {
+      const url = r.video_result?.[0]?.url || r.video_url || r.url || r.video || ''
+      if (!url) return { status: 'failed', error: '云端任务成功但未返回视频地址' }
+      opts.onProgress?.('正在下载找回的视频…', 80)
+      const localUrl = await downloadTo(url, 'video')
+      const poster = await makePoster(localUrl)
+      const meta: Record<string, string | number> = { reclaimed: 1 }
+      if (poster) meta.poster = poster
+      return {
+        status: 'success',
+        output: { video: { kind: 'video', url: localUrl, meta } },
+      }
+    }
+    if (r?.task_status === 'FAIL') {
+      return { status: 'failed', error: '云端任务生成失败，请调整提示词后重试' }
+    }
+    if (Date.now() - start >= waitMs) {
+      return { status: 'running', elapsed: Math.round((Date.now() - start) / 1000) }
+    }
+    opts.onProgress?.(
+      `正在找回云端任务… 已查询 ${Math.round((Date.now() - start) / 1000)}s`,
+      30,
+    )
+    await sleep(5000)
   }
 }

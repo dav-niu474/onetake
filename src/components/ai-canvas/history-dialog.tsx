@@ -22,11 +22,12 @@ import {
   RefreshCw,
   FileText,
   RotateCcw,
+  CloudDownload,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/lib/ai-canvas/store'
 import { NODE_SPECS } from '@/lib/ai-canvas/types'
-import { runNode } from '@/lib/ai-canvas/executor'
+import { runNode, reclaimNodeTask } from '@/lib/ai-canvas/executor'
 
 interface HistoryItem {
   id: string
@@ -36,6 +37,7 @@ interface HistoryItem {
   stage: string
   error: string | null
   output: Record<string, { kind?: string; url?: string; text?: string }> | null
+  remoteTaskId?: string | null
   createdAt: string
   durationMs: number
 }
@@ -163,6 +165,27 @@ export function HistoryDialog() {
                       </p>
                     </div>
                     <div className="flex shrink-0 items-center gap-1">
+                      {item.status === 'failed' &&
+                        item.remoteTaskId &&
+                        (item.nodeType === 'textToVideo' || item.nodeType === 'imageToVideo') &&
+                        useCanvasStore
+                          .getState()
+                          .nodes.some((n) => n.id === item.nodeId) && (
+                          <button
+                            onClick={() => {
+                              void reclaimNodeTask(item.nodeId)
+                              useCanvasStore
+                                .getState()
+                                .showToast('info', '正在找回云端任务…')
+                              setTimeout(() => void refresh(), 3000)
+                            }}
+                            className="flex h-6 items-center gap-1 rounded-md border border-teal-500/40 bg-teal-500/10 px-1.5 text-[9px] text-teal-200 transition hover:bg-teal-500/20"
+                            title="凭远端任务 ID 查询云端状态，成功则把成片回填节点"
+                          >
+                            <CloudDownload className="h-3 w-3" />
+                            找回
+                          </button>
+                        )}
                       {item.status === 'failed' &&
                         useCanvasStore
                           .getState()

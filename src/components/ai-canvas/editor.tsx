@@ -35,6 +35,7 @@ import {
   FoldVertical,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import type { Node } from '@xyflow/react'
 import {
   isConnectionValid,
   NODE_SPECS,
@@ -57,6 +58,7 @@ import { TemplatesDialog } from './templates-dialog'
 import { AssetsDialog } from './assets-dialog'
 import { HistoryDialog } from './history-dialog'
 import { GroupLayer } from './group-layer'
+import { AlignmentGuides } from './alignment-guides'
 
 const nodeTypes: NodeTypes = Object.fromEntries(
   NODE_TYPE_LIST.map((s) => [s.type, GraphNode]),
@@ -169,7 +171,7 @@ function autoLayout() {
 
 function CanvasInner() {
   const wrapper = useRef<HTMLDivElement>(null)
-  const { screenToFlowPosition } = useReactFlow()
+  const { screenToFlowPosition, getZoom } = useReactFlow()
   const nodes = useCanvasStore((s) => s.nodes)
   const edges = useCanvasStore((s) => s.edges)
   const snapToGrid = useCanvasStore((s) => s.snapToGrid)
@@ -405,6 +407,85 @@ function CanvasInner() {
 
   const closeMenu = useCallback(() => setMenu(null), [])
 
+  /* ---------- 拖拽对齐参考线（Smart Alignment Guides） ---------- */
+  /**
+   * 拖动节点时与其他节点的左/中/右、上/中/下边缘比对：
+   * 屏幕距离阈值 6px 内吸附到精确对齐，并显示虚线参考线。
+   * 多选拖拽 / 隐藏节点（折叠分组成员）不参与。
+   */
+  const ALIGN_THRESHOLD_SCREEN = 6
+  const applyAlignment = useCallback(
+    (dragged: Node<CanvasNodeData>, all: Node<CanvasNodeData>[]) => {
+      const zoom = getZoom()
+      const threshold = ALIGN_THRESHOLD_SCREEN / zoom
+      const dw = dragged.measured?.width ?? 0
+      const dh = dragged.measured?.height ?? 0
+      const dxs = [dragged.position.x, dragged.position.x + dw / 2, dragged.position.x + dw]
+      const dys = [dragged.position.y, dragged.position.y + dh / 2, dragged.position.y + dh]
+
+      let bestV: { diff: number; line: number } | null = null
+      let bestH: { diff: number; line: number } | null = null
+
+      for (const other of all) {
+        if (other.id === dragged.id || other.hidden) continue
+        const ow = other.measured?.width ?? 0
+        const oh = other.measured?.height ?? 0
+        const oxs = [other.position.x, other.position.x + ow / 2, other.position.x + ow]
+        const oys = [other.position.y, other.position.y + oh / 2, other.position.y + oh]
+        for (const dx of dxs) {
+          for (const ox of oxs) {
+            const diff = ox - dx
+            if (
+              Math.abs(diff) <= threshold &&
+              (!bestV || Math.abs(diff) < Math.abs(bestV.diff))
+            ) {
+              bestV = { diff, line: ox }
+            }
+          }
+        }
+        for (const dy of dys) {
+          for (const oy of oys) {
+            const diff = oy - dy
+            if (
+              Math.abs(diff) <= threshold &&
+              (!bestH || Math.abs(diff) < Math.abs(bestH.diff))
+            ) {
+              bestH = { diff, line: oy }
+            }
+          }
+        }
+      }
+
+      const snapX = bestV?.diff ?? 0
+      const snapY = bestH?.diff ?? 0
+      if (snapX !== 0 || snapY !== 0) {
+        onNodesChange([
+          {
+            id: dragged.id,
+            type: 'position',
+            position: { x: dragged.position.x + snapX, y: dragged.position.y + snapY },
+          },
+        ])
+      }
+      useCanvasStore.getState().setGuides({
+        vertical: bestV ? [bestV.line] : [],
+        horizontal: bestH ? [bestH.line] : [],
+      })
+    },
+    [getZoom, onNodesChange],
+  )
+
+  const onNodeDrag = useCallback(
+    (_e: unknown, dragged: Node<CanvasNodeData>, draggedNodes: Node<CanvasNodeData>[]) => {
+      if (draggedNodes.length !== 1) {
+        useCanvasStore.getState().setGuides(null)
+        return
+      }
+      applyAlignment(dragged, useCanvasStore.getState().nodes)
+    },
+    [applyAlignment],
+  )
+
   /* ---------- 连线校验 ---------- */
   const isValidConnection = useCallback(
     (conn: { source: string; target: string; sourceHandle: string | null; targetHandle: string | null }) => {
@@ -461,7 +542,14 @@ function CanvasInner() {
               })
             }}
             onNodeDragStart={closeMenu}
-            onNodeDragStop={(_e, _node, draggedNodes) => {
+            onNodeDrag={onNodeDrag}
+            onNodeDragStop={(_e, node, draggedNodes) => {
+              // 单节点拖拽：落点最终吸附（防止 mouseup 原始位置覆盖拖拽中的吸附）
+              if ((draggedNodes as unknown[]).length === 1) {
+                applyAlignment(node, useCanvasStore.getState().nodes)
+              }
+              // 清除对齐参考线
+              useCanvasStore.getState().setGuides(null)
               // 拖拽落点同步分组成员关系（拖入分组框=加入，拖出=移出）
               const ids = (draggedNodes as { id: string }[]).map((n) => n.id)
               if (ids.length > 0) {
@@ -519,6 +607,9 @@ function CanvasInner() {
 
           {/* 节点分组渲染层（overlay，跟随视口 transform） */}
           <GroupLayer onGroupContextMenu={openGroupMenu} />
+
+          {/* 拖拽对齐参考线（overlay） */}
+          <AlignmentGuides />
 
           {/* 右侧 Inspector 属性面板（选中单个节点时） */}
           <Inspector />

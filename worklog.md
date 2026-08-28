@@ -544,3 +544,67 @@ Task: 状态评估 + agent-browser QA + bug 修复 + 功能扩展（进行中，
 4. 分组成员同步的边界打磨：拖拽预览时的框体高亮提示（可加入/将移出），多选批量拖入
 5. 执行历史条目附带画布缩略图（Execution 表 snapshot 字段）
 6. Inspector 按节点 id 订阅优化（>50 节点时的渲染性能）
+
+---
+
+## Task ID: 9 — 远程任务找回 / 429 快速失败 / 节点对齐参考线 / Prisma 缓存修复
+Agent: cron-webDevReview（第 9 轮）
+Task: 状态评估 + agent-browser QA + bug 修复 + 功能扩展
+
+### 项目当前状态描述/判断
+- 上轮全链路稳定，本轮 agent-browser 深度 QA **未发现功能性回归 bug**
+- **澄清一项历史误判**：控制台的 `getSnapshot should be cached` 错误并非真实 bug——agent-browser 的 console 缓冲区跨页面导航累积，旧会话（HMR 周期）的日志被误认为新加载产物。用 `console --clear` 后全新加载实测 **0 错误**（同样确认 React Flow nodeTypes 警告亦为 HMR 周期残留，生产构建无影响）
+- 本轮落地 2 项核心体验功能 + 1 项画布细节功能 + 1 项基础设施修复，错误路径全部实测通过
+- 节点体系仍为 13 种；tv3 云端配额仍被占用（外部约束，详见风险节）
+
+### 🐛 本轮修复的 bug
+1. **Prisma Client 缓存不一致导致 /api/executions 500（schema 演进陷阱，基础设施修复）**
+   - 现象：`prisma db:push` 新增 `remoteTaskId` 列后，运行中的 dev server 全部 `Execution.findMany` 500（`Unknown field remoteTaskId`）
+   - 根因链：① globalThis 单例缓存旧 PrismaClient 实例（touch db.ts 触发 HMR 也无法重建）② Turbopack 持久编译缓存中的 `.prisma/client` 运行时不随 node_modules 文件变化失效（直接改 import 路径也无效）
+   - 修复（务实双轨）：
+     - `remoteTaskId` 的**读写全部改走原生 SQL**（`$queryRawUnsafe` / `$executeRawUnsafe`，含 IN 占位符批量读），绕过类型化客户端运行时——与新旧客户端均兼容
+     - `src/lib/db.ts` 增加 `SCHEMA_VERSION` 标记：以后 schema 变更后 bump 版本号即可强制重建全局实例（未来 dev server 重启后可切回类型化字段）
+   - 实证：GET /api/executions、/api/executions/history、/api/executions/reclaim 全部恢复正常（history 17 条 + remoteTaskId 字段正常返回）
+
+### ✨ 本轮新增功能（错误路径全部实测验证）
+1. **远程视频任务找回（reclaim）— 治理「超时/中断后云端任务丢失」**
+   - 数据：Execution 表新增 `remoteTaskId` 列；视频类节点提交成功后由 `executeNode` 的 `onRemoteTask` 回调落库（stage 同步「远端任务已受理」）
+   - 服务端：`POST /api/executions/reclaim`（executionId 或 workflowId+nodeId 定位最近含 remoteTaskId 的记录）→ 查询云端任务状态：SUCCESS 则下载成片 + 首帧海报 + 执行记录回写 success；FAIL 回写失败原因；运行中返回 elapsed
+   - `reclaimRemoteVideoTask(taskId, { waitMs })`（runner.ts）：等待模式每 5s 轮询（前端传 150s），网络抖动容忍 15s
+   - 前端：`reclaimNodeTask(nodeId)`（executor.ts）→ 成功后 applyOutputs 回填节点 + 下游传播 + toast；仍在运行保持 failed 态（按钮保留）+ info toast
+   - UI 双入口：① 视频节点失败态的错误信息含「超时/找回」时显示「找回云端任务」琥珀按钮 ② 运行历史对话框失败视频记录显示「找回」青色按钮（remoteTaskId 存在时）
+   - 超时错误信息升级：「视频生成超时（10 分钟）：云端任务可能仍在进行，可通过『找回任务』恢复成果」
+   - 实测：404 路径（无远端任务记录）→ 节点错误区回显清晰提示 ✓；按钮渲染（超时文案注入）✓；history 找回按钮渲染路径 ✓
+2. **视频提交 429 快速失败（执行体验升级）**
+   - 重试策略：6 次/15s 线性退避（总窗口 ≈5min，曾让整图运行长时间阻塞）→ **3 次/8s（总窗口 ≈24s）**
+   - 重试耗尽后的错误信息行动导向化：「视频生成配额受限（同账号同时仅 1 个活跃任务 + 分钟级提交配额）。请稍候 1-2 分钟后重试；若此前有任务曾显示『生成中』，可点『找回任务』恢复其成果」——该文案含「找回」关键词，429 场景也能触发找回按钮（支持僵尸任务恢复路径：僵尸任务所属执行记录有 remoteTaskId，找回按 workflowId+nodeId 定位最近含 ID 记录）
+   - 实测：tv3 真实重跑 → 「8s 后自动重试（1/3）…」→「（3/3）」→ ≈50s 快速失败（旧策略需 5min+）✓；新错误信息节点内正确渲染 ✓
+3. **节点拖拽对齐参考线（Smart Alignment Guides）— 画布产品核心细节**
+   - 几何：拖动节点时与**全部其他可见节点**的左/中/右、上/中/下三线九点比对；屏幕距离阈值 6px（随 zoom 换算 flow 距离）；每轴取最近对齐
+   - 吸附：拖拽中 + 拖拽结束双阶段派发 position change（防 mouseup 原始位置覆盖吸附结果）
+   - 渲染：`alignment-guides.tsx` overlay 层（GroupLayer 同款视口变换方案），洋红虚线 + 发光，线宽按 1/zoom 缩放保证屏幕恒定 1px；多选拖拽/隐藏节点（折叠分组成员）不参与；拖拽结束自动清理
+   - 状态：store 新增 `guides` 瞬态字段 + `setGuides`（不入撤销栈/持久化）
+   - 实测（CDP 受信任鼠标事件逐帧拖拽）：拖至 tv3 顶边附近 → `guides={vertical:[580], horizontal:[680]}`（580=tv1 中心线、680=tv3 顶边）✓；截图可见洋红十字虚线 ✓；松开后 y 精确吸附 680 ✓；超出阈值时正确不吸附 ✓；参考线清理 ✓；与自动保存/撤销栈无冲突 ✓
+4. **细节**
+   - 历史对话框/节点 UI 的找回按钮均带 title 工具提示；graph-node 失败卡片重构为双行布局（错误文案 + 按钮区）
+
+### 验证结果汇总
+- lint 0 错误 0 警告；全新加载控制台 0 错误（console --clear 后实测）
+- 回归：模板库（7 卡片）/ 运行历史（17 条）/ 添加节点 / 撤销重做（12→13→12→13）/ 删除 / 自动保存（PUT 200 + attach）全通过
+- 新功能实测：快速失败重试链（真实 429 场景）、行动导向错误、找回 404 路径、找回按钮渲染 ×2、对齐参考线吸附（真拖拽）、Prisma 原生 SQL 双路由恢复 —— 全部通过
+- s3 节点测试后已恢复原位 (40,700)，自动保存落库
+
+### 未解决问题 / 风险
+- **tv3 云端配额持续 429（外部约束）**：本轮 3 次真实补跑尝试（间隔 3-8 分钟）全部在提交阶段被限。疑似 Task 8 的 05:08 轮询超时任务（progress 92 时放弃）成为僵尸任务长期占用「同账号 1 个活跃任务」配额；该记录无 remoteTaskId（功能未存在），无法找回清理，只能等待云端任务自然过期。**下次会话可直接重试 tv3（极速模式）→ 成功后 remoteTaskId 落库 + 分组「成片链路」重跑即得三幕完整成片**
+- remoteTaskId 持久化 + 找回成功路径（真实视频生成 → 找回下载回填）尚未端到端实跑（依赖配额释放）；代码路径与进度更新机制相同，风险低
+- dev server 的 Turbopack 编译缓存导致 schema 变更必须配 SCHEMA_VERSION bump（已在 db.ts 注释说明）；生产构建不受影响
+- 对齐参考线在节点数 >100 时为 O(n) 每帧计算（当前规模无感知，超大规模可加空间索引）
+- 上轮遗留：分组标签贴近画布左缘时浮层被裁剪（可接受）；html-to-image 缩略图排除 video/audio 元素
+
+### 下一轮建议（优先级从高到低）
+1. **tv3 补跑 + 找回机制端到端**（配额释放后）：极速模式提交 → 验证 remoteTaskId 落库 →（如超时）找回按钮全链路 → 三幕拼接重跑 → 完整成片
+2. 执行历史条目附带画布快照（Execution 表 snapshot 字段 + history-dialog 展示缩略图）
+3. Inspector 失败态增加「找回任务」按钮（与节点内按钮对齐；当前仅重试）
+4. 找回轮询进度可视化：找回等待期间节点 stage 实时显示「已查询 Ns」（当前服务端 onProgress 已回写执行记录，前端 reclaimNodeTask 可轮询执行记录获取进度）
+5. 分组成员同步边界打磨：拖拽预览时框体高亮（可加入/将移出提示）
+6. Inspector 按节点 id 订阅优化（>50 节点渲染性能）

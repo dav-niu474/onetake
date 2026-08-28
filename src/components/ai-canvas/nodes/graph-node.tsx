@@ -31,6 +31,7 @@ import {
   Merge,
   Layers,
   PackageOpen,
+  CloudDownload,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -41,7 +42,7 @@ import {
   type PortDef,
 } from '@/lib/ai-canvas/types'
 import { useCanvasStore } from '@/lib/ai-canvas/store'
-import { runNode } from '@/lib/ai-canvas/executor'
+import { runNode, reclaimNodeTask } from '@/lib/ai-canvas/executor'
 import { exportUrlToDownload } from '@/lib/ai-canvas/client-export'
 import { getAccent } from './accents'
 import { ParamControl } from './param-controls'
@@ -500,8 +501,20 @@ function NodeBody({
               poster={outputs.video.meta?.poster ? String(outputs.video.meta.poster) : undefined}
             />
           ) : data.runState === 'failed' ? (
-            <div className="rounded-lg border border-rose-500/30 bg-rose-500/5 p-2 text-[10px] text-rose-300">
-              {data.error || '生成失败'}
+            <div className="space-y-1.5 rounded-lg border border-rose-500/30 bg-rose-500/5 p-2 text-[10px] text-rose-300">
+              <p>{data.error || '生成失败'}</p>
+              {(type === 'textToVideo' || type === 'imageToVideo') &&
+                /超时|找回/.test(data.error ?? '') && (
+                  <button
+                    nodrag=""
+                    onClick={() => void reclaimNodeTask(id)}
+                    className="flex w-full items-center justify-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[10px] font-medium text-amber-300 transition hover:bg-amber-500/20"
+                    title="查询云端任务状态，成功则把成片回填到本节点"
+                  >
+                    <CloudDownload className="h-3 w-3" />
+                    找回云端任务
+                  </button>
+                )}
             </div>
           ) : (
             <div className="flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-zinc-800 py-5">

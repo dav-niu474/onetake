@@ -96,6 +96,8 @@ export interface CanvasStore {
   historyOpen: boolean
   snapToGrid: boolean
   toast: { type: 'success' | 'error' | 'info'; message: string } | null
+  /* 拖拽对齐参考线（瞬态，不入撤销栈/持久化）：flow 坐标下的对齐线位置 */
+  guides: { vertical: number[]; horizontal: number[] }
 
   /* ---- actions ---- */
   onNodesChange: (changes: NodeChange<Node<CanvasNodeData>>[]) => void
@@ -156,6 +158,7 @@ export interface CanvasStore {
   setAssetsOpen: (v: boolean) => void
   setHistoryOpen: (v: boolean) => void
   setSnapToGrid: (v: boolean) => void
+  setGuides: (g: { vertical: number[]; horizontal: number[] } | null) => void
   showToast: (type: 'success' | 'error' | 'info', message: string) => void
   clearToast: () => void
 }
@@ -190,6 +193,7 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
   historyOpen: false,
   snapToGrid: false,
   toast: null,
+  guides: { vertical: [], horizontal: [] },
 
   /* 结构性变更前调用：快照当前状态入历史栈 */
   commit: () => {
@@ -826,6 +830,8 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
   setAssetsOpen: (v) => set({ assetsOpen: v }),
   setHistoryOpen: (v) => set({ historyOpen: v }),
   setSnapToGrid: (v) => set({ snapToGrid: v }),
+  setGuides: (g) =>
+    set({ guides: g ?? { vertical: [], horizontal: [] } }),
   showToast: (type, message) => set({ toast: { type, message } }),
   clearToast: () => set({ toast: null }),
 }))

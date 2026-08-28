@@ -5,6 +5,9 @@ import { executeNode } from '@/lib/ai-canvas/runner'
 /**
  * 查询工作流各节点最近一次执行记录（用于页面刷新后恢复运行状态）
  * GET /api/executions?workflowId=xxx
+ *
+ * 注：remoteTaskId 通过原生 SQL 读取（dev server 的 Prisma Client 可能先于 schema 生成，
+ * 重启后可改回类型化字段；原生 SQL 与两种客户端均兼容）
  */
 export async function GET(req: NextRequest) {
   try {
@@ -33,8 +36,25 @@ export async function GET(req: NextRequest) {
     for (const row of rows) {
       if (!latest.has(row.nodeId)) latest.set(row.nodeId, row)
     }
+    // 原生 SQL 批量读取 remoteTaskId
+    const ids = [...latest.values()].map((r) => r.id)
+    const remoteMap = new Map<string, string | null>()
+    if (ids.length > 0) {
+      try {
+        const placeholders = ids.map(() => '?').join(',')
+        const remoteRows = await db.$queryRawUnsafe<
+          { id: string; remoteTaskId: string | null }[]>(
+          `SELECT id, remoteTaskId FROM Execution WHERE id IN (${placeholders})`,
+          ...ids,
+        )
+        remoteRows.forEach((r) => remoteMap.set(r.id, r.remoteTaskId))
+      } catch {
+        /* 列尚不存在时忽略（旧 schema 兼容） */
+      }
+    }
     const items = [...latest.values()].map((row) => ({
       ...row,
+      remoteTaskId: remoteMap.get(row.id) ?? null,
       output: row.output ? (() => {
         try {
           return JSON.parse(row.output as string)
@@ -88,6 +108,17 @@ export async function POST(req: NextRequest) {
           .update({ where: { id: row.id }, data })
           .catch(() => undefined)
       }
+      // remoteTaskId 持久化走原生 SQL（兼容旧客户端运行时）
+      const updateRemoteTask = (taskId: string) => {
+        void db
+          .$executeRawUnsafe(
+            'UPDATE Execution SET remoteTaskId = ?, stage = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?',
+            taskId,
+            '远端任务已受理，等待生成…',
+            row.id,
+          )
+          .catch(() => undefined)
+      }
       try {
         const outputs = await executeNode(
           String(nodeType),
@@ -96,6 +127,8 @@ export async function POST(req: NextRequest) {
             params: body.params ?? {},
           },
           (stage, progress) => update({ stage, progress }),
+          // 视频类节点提交成功后记录远端任务 ID：超时/中断后可凭此找回云端成果
+          updateRemoteTask,
         )
         update({
           status: 'success',
