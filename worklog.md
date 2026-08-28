@@ -839,3 +839,18 @@ Task: 品牌命名推演 + IP 形象设计 + 品牌资产入库
 1. repo slug 重命名确认 + 阿镜表情包扩展（配额恢复后）
 2. 沿用 Task 11/12 建议：tv3 补跑 → 三幕成片闭环
 3. 画布空态欢迎卡加入阿镜形象（SVG 已就绪，可直接 <img> 引用 /onetake-logo.svg 或 mascot）
+
+---
+
+## Task ID: 14 — GitHub 仓库改名 onetake
+Agent: main (Z.ai Code)
+Task: 按用户确认执行仓库重命名
+
+### 已完成内容
+- PATCH API 将 dav-niu474/agent-video-canvas 改名为 **dav-niu474/onetake**（API 回读确认 full_name/html_url）
+- 本地 git remote URL 同步更新为 dav-niu474/onetake.git，push 验证通过
+- README/docs/src 无旧仓库 URL 残留（worklog 中历史记录保留原名属正常）
+- GitHub 旧地址自动 301 重定向到新地址，About/topics/README 均随仓库保留
+
+### 验证结果
+- https://github.com/dav-niu474/onetake 可访问，默认分支 main，描述/标签完好
