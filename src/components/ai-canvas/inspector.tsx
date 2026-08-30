@@ -33,6 +33,8 @@ import { useCanvasStore } from '@/lib/ai-canvas/store'
 import { runNode, reclaimNodeTask } from '@/lib/ai-canvas/executor'
 import { getAccent } from './nodes/accents'
 import { ParamControl } from './nodes/param-controls'
+import { ProParamsPanel } from './pro-params-panel'
+import { PRO_PARAM_NODE_TYPES } from '@/lib/ai-canvas/pro-params'
 import { useIsMobile } from '@/hooks/use-mobile'
 import {
   Drawer,
@@ -351,6 +353,19 @@ function InspectorBody({ nodeId }: { nodeId: string }) {
                 </div>
               ))
             })()}
+          </Section>
+        )}
+
+        {/* 专业参数：AI 生成节点点选注入，运行时自动追加到提示词（Sparkles 图标复用上方 ICONS 映射的 lucide 导入） */}
+        {node.type && PRO_PARAM_NODE_TYPES.has(node.type) && (
+          <Section title="专业参数" icon={<Sparkles className="h-3 w-3" />}>
+            <ProParamsPanel
+              nodeType={node.type}
+              params={params}
+              onChange={(pro) => updateNodeParam(node.id, 'pro', pro)}
+              accent={spec.accent}
+              disabled={runState === 'running'}
+            />
           </Section>
         )}
 

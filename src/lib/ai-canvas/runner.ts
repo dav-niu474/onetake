@@ -10,6 +10,7 @@ import ZAI from 'z-ai-web-dev-sdk'
 import { db } from '@/lib/db'
 import { getProviderConfig, type ResolvedProvider } from '@/lib/ai-canvas/provider-config'
 import { callChat } from '@/lib/ai-canvas/provider-protocol'
+import { buildProPrompt, buildTTSInstructions, countProParams } from '@/lib/ai-canvas/pro-params'
 
 const execFileAsync = promisify(execFile)
 
@@ -244,6 +245,7 @@ async function callCustomTTS(
   text: string,
   voiceParam?: string,
   speed?: number,
+  instructions?: string, // TTS 语气指令（OpenAI /audio/speech 的 instructions 字段）
   onProgress?: ProgressFn,
 ): Promise<{ url: string; voice: string; ext: string }> {
   if (cfg.protocol !== 'openai') {
@@ -271,6 +273,7 @@ async function callCustomTTS(
             voice,
             input: text,
             ...(speed ? { speed } : {}),
+            ...(instructions ? { instructions } : {}),
             response_format: 'wav',
           }),
         },
@@ -344,6 +347,18 @@ function str(params: Record<string, unknown>, key: string): string {
 
 function bool(params: Record<string, unknown>, key: string): boolean {
   return params[key] === true || params[key] === 'true'
+}
+
+/** 基础提示词 + 专业参数注入片段；pro 为空时原样返回 */
+function composeProPrompt(
+  basePrompt: string,
+  nodeType: string,
+  params: Record<string, unknown>,
+): string {
+  const pro = buildProPrompt(nodeType, params)
+  if (!pro) return basePrompt
+  const base = basePrompt.replace(/[。\s]+$/, '')
+  return base ? `${base}。\n${pro}` : pro
 }
 
 /* ------------------------------ 媒体工具（ffmpeg） ------------------------------ */
@@ -632,8 +647,10 @@ async function runImageGen(
   io: ExecIO,
   onProgress: ProgressFn,
 ): Promise<Record<string, { kind: string; url?: string; text?: string }>> {
-  const prompt = str(io.params, 'prompt') || io.inputs.text?.text || ''
-  if (!prompt) throw new Error('缺少提示词：请连接提示词节点或在节点内填写')
+  const basePrompt = str(io.params, 'prompt') || io.inputs.text?.text || ''
+  if (!basePrompt) throw new Error('缺少提示词：请连接提示词节点或在节点内填写')
+  const prompt = composeProPrompt(basePrompt, 'imageGen', io.params)
+  const proCount = countProParams('imageGen', io.params)
   const size = str(io.params, 'size') || '1024x576'
   onProgress('正在构思画面…', 15)
 
@@ -644,7 +661,11 @@ async function runImageGen(
     const url = await callCustomImageGen(custom, prompt, size, onProgress)
     onProgress('正在保存图像…', 85)
     return {
-      image: { kind: 'image', url, meta: { model: custom.model, size, provider: 'custom' } },
+      image: {
+        kind: 'image',
+        url,
+        meta: { model: custom.model, size, provider: 'custom', ...(proCount > 0 ? { proParams: proCount } : {}) },
+      },
     }
   }
 
@@ -658,7 +679,7 @@ async function runImageGen(
   onProgress('正在保存图像…', 85)
   const url = await saveBase64Image(b64)
   return {
-    image: { kind: 'image', url, meta: { model: 'cogview', size } },
+    image: { kind: 'image', url, meta: { model: 'cogview', size, ...(proCount > 0 ? { proParams: proCount } : {}) } },
   }
 }
 
@@ -668,9 +689,11 @@ async function runImageEdit(
 ): Promise<Record<string, { kind: string; url?: string; text?: string }>> {
   // 图生图保持内置：各家图像编辑协议差异大（mask / 图层 / 参考图传法不一），
   // OpenAI 兼容协议对「图像编辑」并不通用，故暂不开放自定义供应商接入
-  const prompt = str(io.params, 'prompt') || io.inputs.text?.text || ''
-  if (!prompt) throw new Error('缺少提示词：请描述想要的改动')
+  const basePrompt = str(io.params, 'prompt') || io.inputs.text?.text || ''
+  if (!basePrompt) throw new Error('缺少提示词：请描述想要的改动')
   if (!io.inputs.image?.url) throw new Error('缺少图像输入：请连接上游图像')
+  const prompt = composeProPrompt(basePrompt, 'imageEdit', io.params)
+  const proCount = countProParams('imageEdit', io.params)
   const size = str(io.params, 'size')
   onProgress('正在读取原图…', 15)
   const base64 = await imageToBase64(io.inputs.image.url)
@@ -690,7 +713,7 @@ async function runImageEdit(
   onProgress('正在保存图像…', 85)
   const url = await saveBase64Image(b64)
   return {
-    image: { kind: 'image', url, meta: { model: 'image-edit' } },
+    image: { kind: 'image', url, meta: { model: 'image-edit', ...(proCount > 0 ? { proParams: proCount } : {}) } },
   }
 }
 
@@ -743,8 +766,10 @@ async function runTextToVideo(
   // 供应商扩展点：视频能力暂未开放自定义供应商接入（各平台异步任务协议差异大，
   // 无通用标准），当前固定使用内置智谱视频生成；后续可在 getProviderConfig('video')
   // 基础上扩展自定义 baseUrl / model 路由
-  const prompt = str(io.params, 'prompt') || io.inputs.text?.text || ''
-  if (!prompt) throw new Error('缺少提示词：请连接提示词节点或在节点内填写')
+  const basePrompt = str(io.params, 'prompt') || io.inputs.text?.text || ''
+  if (!basePrompt) throw new Error('缺少提示词：请连接提示词节点或在节点内填写')
+  const prompt = composeProPrompt(basePrompt, 'textToVideo', io.params)
+  const proCount = countProParams('textToVideo', io.params)
   const quality = str(io.params, 'quality') || 'quality'
   const withAudio = bool(io.params, 'withAudio')
   onProgress('正在提交视频任务…', 8)
@@ -776,7 +801,11 @@ async function runTextToVideo(
   onProgress('正在下载视频…', 93)
   const url = await downloadTo(remoteUrl, 'video')
   const poster = await makePoster(url)
-  const meta: Record<string, string | number> = { quality, withAudio: withAudio ? 1 : 0 }
+  const meta: Record<string, string | number> = {
+    quality,
+    withAudio: withAudio ? 1 : 0,
+    ...(proCount > 0 ? { proParams: proCount } : {}),
+  }
   if (poster) meta.poster = poster
   return {
     video: { kind: 'video', url, meta },
@@ -790,7 +819,10 @@ async function runImageToVideo(
 ): Promise<Record<string, { kind: string; url?: string; text?: string }>> {
   // 供应商扩展点：同 runTextToVideo，图生视频暂固定使用内置智谱能力
   if (!io.inputs.image?.url) throw new Error('缺少图像输入：请连接上游图像')
-  const prompt = str(io.params, 'prompt') || io.inputs.text?.text || ''
+  const basePrompt = str(io.params, 'prompt') || io.inputs.text?.text || ''
+  // basePrompt 允许为空：仅设专业参数（如只选运镜）时，注入片段本身即为运动描述
+  const prompt = composeProPrompt(basePrompt, 'imageToVideo', io.params)
+  const proCount = countProParams('imageToVideo', io.params)
   const quality = str(io.params, 'quality') || 'quality'
   const withAudio = bool(io.params, 'withAudio')
   onProgress('正在读取图像…', 6)
@@ -824,7 +856,11 @@ async function runImageToVideo(
   onProgress('正在下载视频…', 93)
   const url = await downloadTo(remoteUrl, 'video')
   const poster = await makePoster(url)
-  const meta: Record<string, string | number> = { quality, withAudio: withAudio ? 1 : 0 }
+  const meta: Record<string, string | number> = {
+    quality,
+    withAudio: withAudio ? 1 : 0,
+    ...(proCount > 0 ? { proParams: proCount } : {}),
+  }
   if (poster) meta.poster = poster
   return {
     video: { kind: 'video', url, meta },
@@ -1027,13 +1063,16 @@ async function runTTS(
   const voiceRaw = str(io.params, 'voice')
   const voice = voiceRaw && voiceRaw !== 'default-voice' ? voiceRaw : undefined
   const speed = num(io.params, 'speed')
+  // 专业参数：序列化为 TTS 语气指令（仅自定义 OpenAI 兼容供应商时真正生效）
+  const instructions = buildTTSInstructions(io.params)
+  const proCount = countProParams('tts', io.params)
   onProgress('正在合成语音…', 30)
 
   // 自定义语音供应商（OpenAI 兼容 /audio/speech）：配置且启用时使用，错误直接抛给节点显示
   const custom = await getProviderConfig('tts')
   if (custom) {
     onProgress(`使用 ${custom.accountName ?? '自定义'} · ${custom.model || '默认语音模型'}…`, 40)
-    const r = await callCustomTTS(custom, text, voice, speed, onProgress)
+    const r = await callCustomTTS(custom, text, voice, speed, instructions, onProgress)
     onProgress('正在封装音频…', 80)
     return {
       audio: {
@@ -1044,11 +1083,13 @@ async function runTTS(
           speed: speed ?? 1,
           format: r.ext,
           provider: 'custom',
+          ...(proCount > 0 ? { proParams: proCount } : {}),
         },
       },
     }
   }
 
+  // 内置智谱 TTS 不支持语气指令，已设置的专业参数在此静默忽略
   const zai = await ZAI.create()
   const res = await withRetry(
     () =>
@@ -1073,7 +1114,7 @@ async function runTTS(
     audio: {
       kind: 'audio',
       url,
-      meta: { voice: voice ?? 'default', speed: speed ?? 1 },
+      meta: { voice: voice ?? 'default', speed: speed ?? 1, ...(proCount > 0 ? { proParams: proCount } : {}) },
     },
   }
 }

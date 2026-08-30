@@ -1048,3 +1048,51 @@ Task: 用户反馈 4 项：①能力路由模型按能力域过滤 ②模型列�
 1. 真实供应商 key 实测（DeepSeek/硅基流动）；视频供应商两段式配置化接入
 2. 节点级模型覆写（同能力不同节点不同模型）；供应商余额查询
 3. 素材库扩展：预置 BGM/音效包；灵感提示词支持一键注入选中节点
+
+---
+
+## Task ID: 18 — 生成节点专业参数系统（设置后自动注入提示词）
+Agent: main (Z.ai Code) + full-stack-developer 子代理（18-a）+ frontend-styling-expert 子代理（18-b）
+Task: 用户需求「AI 生成的这些节点，增加专业的参数设计辅助用户，设置后自动补充到提示词中」
+
+### 项目当前状态描述/判断
+- Task 17 后基线稳定；本轮新增「专业参数」系统并完成三条链路（图像/视频/语音）真实生成闭环验证
+
+### 已完成内容
+
+**1. 契约模块 src/lib/ai-canvas/pro-params.ts（18-0 主代理）**
+- PRO_PARAM_GROUPS 按节点类型注册：imageGen/imageEdit 共用图像 5 组（画面风格 10/光影氛围 8/构图景别 8/色调 6/画质质感 6）；textToVideo/imageToVideo 共用视频 5 组（运镜方式 8/景别 4/时空氛围 7/画面风格 7/情绪基调 6）；tts 语气情感 8 档
+- 每个选项 = { value, label, prompt }，prompt 为注入用的专业术语完整片段（如「黄金时刻的暖调逆光」）
+- buildProPrompt：已选参数序列化为「运镜方式：镜头缓慢推近；时空氛围：黄昏暮色的暖调氛围」格式；buildTTSInstructions：TTS 语气指令文本（供 OpenAI 兼容 /audio/speech 的 instructions 字段）；getProValues/countProParams 工具
+- 存储：节点 params.pro（Record<groupKey, optionValue>），旧节点无此字段自动兼容
+
+**2. 执行引擎集成 runner.ts（18-a 子代理，+55/−14 行仅限该文件）**
+- 新增 composeProPrompt：注入片段非空时「base。\\n专业参数片段」拼接到提示词末尾（base 为空时片段本身即提示词——图生视频只选运镜不写描述也生效）
+- runImageGen / runImageEdit / runTextToVideo / runImageToVideo 四节点全量接入；输出 meta 新增 proParams: N（已设参数个数）
+- runTTS：语气指令经 callCustomTTS 第 5 参透传（body 加 instructions 字段）；内置智谱 TTS 不支持语气指令，静默忽略（中文注释说明）
+- 既有校验文案/进度语义/重试策略零变更；eslint 0 错误，tsc 与 git HEAD 基线逐条比对 0 新增错误
+
+**3. 专业参数面板 UI（18-b 子代理）**
+- 新建 src/components/ai-canvas/pro-params-panel.tsx：chips 单选组（flex-wrap 圆角胶囊，选中 accent 高亮 + ring + active:scale-95，点击已选=取消）；组标题带 hint 问号 tooltip + 当前选中值徽标；「已选 N 项」+「清除全部」；注入预览（emerald 等宽小字块，useMemo 实时刷新，tts 显示「语气指令预览」）；chips title=完整注入术语、aria-pressed 无障碍
+- inspector.tsx 最小侵入接入（+16 行）：「参数设置」后新增「专业参数」Section（Sparkles 图标），仅 PRO_PARAM_NODE_TYPES 内的节点类型渲染；桌面 aside 与移动 Drawer 共用
+
+### 验证结果（agent-browser 端到端实测）
+- lint 全量 0 错误；编译通过；console 无错误
+- 面板渲染：文生视频节点 5 组 32 chips / 文生图节点 5 组 38 chips / AI 配音语气 8 chips 全部正确；空态预览文案正确
+- 交互：点选 chips 高亮（节点 accent 色）+ 组徽标 +「已选 3 项」；再次点击取消恢复空态；注入预览实时刷新（「运镜方式：镜头缓慢推近，逐步聚焦主体；时空氛围：黄昏暮色的暖调氛围；画面风格：电影质感…」）
+- **真实运行闭环 ×3**：
+  - AI 配音（内置智谱）→ 成功 9.2s，meta { voice: tongtong, proParams: 1 } ✓
+  - 文生图（内置智谱）→ 成功，meta { model: cogview, proParams: 3 }，成图精确体现 写实摄影+黄金时刻暖调逆光+浅景深虚化（葱油拌面特写）✓
+  - 文生视频（内置智谱）→ 成功 ~6min，meta { proParams: 3, poster }，海报精确体现 黄昏暮色+电影质感+推近运动 ✓
+- 测试现场已清理（未保存工作流刷新丢弃；产物留 /generated 不入库）
+
+### 已知问题 / 说明
+- 自动化测试工具的 fill/type 与 React 受控组件存在兼容问题（DOM 值变但 onChange 不触发），真实用户键入不受影响——测试中以「聚焦 + 键盘逐键输入」绕过，非应用 bug
+- runner.ts 存在 11 条 tsc 历史基线错误（返回值类型标注缺 meta 字段 + Buffer 泛型，改动前即存在），建议后续单独任务清理
+- TTS 语气指令仅对自定义 OpenAI 兼容供应商生效（内置智谱能力不支持，UI 文案已说明）
+
+### 下一轮建议（优先级从高到低）
+1. 节点级模型覆写（同一能力不同节点用不同模型）；供应商余额/用量查询
+2. 视频供应商两段式（提交+轮询）配置化接入；真实供应商 key 实测
+3. 灵感提示词一键注入专业参数（素材库灵感词 → 参数联动）；专业参数预设包（如「王家卫风」「宫崎骏风」一键整套应用）
+4. tsc 历史基线错误清理；产品公网 URL 部署后写入 README/About
