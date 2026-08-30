@@ -32,9 +32,14 @@ import {
   ImageOff,
   Pencil,
   HardDriveDownload,
+  Lightbulb,
+  Package,
+  Copy,
+  Check,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/lib/ai-canvas/store'
+import { INSPIRATION_GROUPS } from '@/lib/ai-canvas/inspiration'
 
 interface AssetItem {
   url: string
@@ -42,16 +47,25 @@ interface AssetItem {
   name: string
   size: number
   mtime: number
+  source: 'generated' | 'upload' | 'preset'
 }
 
 type KindFilter = 'all' | 'image' | 'video' | 'audio'
 type SortMode = 'newest' | 'oldest' | 'largest'
+type SourceFilter = 'all' | 'preset' | 'mine'
+type DialogTab = 'media' | 'inspire'
 
 const KIND_TABS: { key: KindFilter; label: string }[] = [
   { key: 'all', label: '全部' },
   { key: 'image', label: '图像' },
   { key: 'video', label: '视频' },
   { key: 'audio', label: '音频' },
+]
+
+const SOURCE_TABS: { key: SourceFilter; label: string }[] = [
+  { key: 'all', label: '全部来源' },
+  { key: 'preset', label: '平台预置' },
+  { key: 'mine', label: '我的素材' },
 ]
 
 const SORT_OPTIONS: { key: SortMode; label: string }[] = [
@@ -62,6 +76,15 @@ const SORT_OPTIONS: { key: SortMode; label: string }[] = [
 
 /** 系统自动生成的视频首帧海报（poster_*）默认折叠，避免干扰浏览 */
 const isSystemPoster = (name: string) => name.startsWith('poster_')
+
+/** 预置素材展示名：style-cinematic-city.png → cinematic city */
+function presetDisplayName(name: string) {
+  return name
+    .replace(/\.(png|jpe?g|webp|gif|wav|mp3|m4a|mp4|webm)$/i, '')
+    .replace(/^(style|narration)[-_]/, '')
+    .replace(/[-_]+/g, ' ')
+    .trim()
+}
 
 function fmtSize(n: number) {
   if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`
@@ -127,10 +150,12 @@ export function AssetsDialog() {
   const open = useCanvasStore((s) => s.assetsOpen)
   const setOpen = useCanvasStore((s) => s.setAssetsOpen)
   const showToast = useCanvasStore((s) => s.showToast)
+  const [tab, setTab] = useState<DialogTab>('media')
   const [items, setItems] = useState<AssetItem[]>([])
   const [loading, setLoading] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [filter, setFilter] = useState<KindFilter>('all')
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all')
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<SortMode>('newest')
   const [showPosters, setShowPosters] = useState(false)
@@ -261,7 +286,7 @@ export function AssetsDialog() {
     }
   }
 
-  /* 过滤：类型 + 系统海报开关 + 关键词；再按排序规则排列 */
+  /* 过滤：来源 + 类型 + 系统海报开关 + 关键词；再按排序规则排列（排序仅对非预置生效） */
   const posterHidden = items.filter((i) => isSystemPoster(i.name) && !showPosters).length
   const visibleItems = items.filter(
     (i) => showPosters || !isSystemPoster(i.name),
@@ -271,8 +296,13 @@ export function AssetsDialog() {
     image: visibleItems.filter((i) => i.kind === 'image').length,
     video: visibleItems.filter((i) => i.kind === 'video').length,
     audio: visibleItems.filter((i) => i.kind === 'audio').length,
+    preset: visibleItems.filter((i) => i.source === 'preset').length,
+    mine: visibleItems.filter((i) => i.source !== 'preset').length,
   }
   const filtered = visibleItems
+    .filter((i) =>
+      sourceFilter === 'all' ? true : sourceFilter === 'preset' ? i.source === 'preset' : i.source !== 'preset',
+    )
     .filter((i) => filter === 'all' || i.kind === filter)
     .filter((i) => {
       const q = query.trim().toLowerCase()
@@ -280,6 +310,9 @@ export function AssetsDialog() {
       return i.name.toLowerCase().includes(q)
     })
     .sort((a, b) => {
+      const aP = a.source === 'preset'
+      const bP = b.source === 'preset'
+      if (aP !== bP) return aP ? -1 : 1
       if (sort === 'oldest') return a.mtime - b.mtime
       if (sort === 'largest') return b.size - a.size
       return b.mtime - a.mtime
@@ -294,12 +327,61 @@ export function AssetsDialog() {
             素材库
           </DialogTitle>
           <DialogDescription className="text-zinc-500">
-            历史生成的图片 / 视频 / 音频与上传素材，一键插入画布复用
+            平台预置风格图与示例旁白 + 历史生成与上传的素材，一键插入画布复用；灵感提示词点击即复制
           </DialogDescription>
         </DialogHeader>
 
-        {/* 工具栏：筛选 + 搜索 + 排序 + 上传 + 刷新 */}
+        {/* 主 Tab：素材 / 灵感 */}
+        <div className="flex gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 p-1">
+          {(
+            [
+              { id: 'media' as DialogTab, label: '媒体素材', icon: <PackageOpen className="h-3.5 w-3.5" /> },
+              { id: 'inspire' as DialogTab, label: '灵感提示词', icon: <Lightbulb className="h-3.5 w-3.5" /> },
+            ]
+          ).map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={cn(
+                'flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-medium transition',
+                tab === t.id
+                  ? 'bg-sky-500/15 text-sky-200 shadow-[inset_0_0_0_1px_rgba(14,165,233,0.3)]'
+                  : 'text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200',
+              )}
+            >
+              {t.icon}
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {tab === 'inspire' ? (
+          <InspirePane onCopy={(text) => {
+            void navigator.clipboard
+              .writeText(text)
+              .then(() => showToast('success', '提示词已复制，粘贴到任意提示词节点即可'))
+              .catch(() => showToast('error', '复制失败，请手动选择文本复制'))
+          }} />
+        ) : (
+        <>
+        {/* 工具栏：来源 + 类型 + 搜索 + 排序 + 上传 + 刷新 */}
         <div className="flex flex-wrap items-center gap-1.5">
+          {SOURCE_TABS.map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setSourceFilter(t.key)}
+              className={cn(
+                'rounded-md border px-2.5 py-1 text-[11px] transition',
+                sourceFilter === t.key
+                  ? 'border-amber-500/50 bg-amber-500/15 text-amber-200'
+                  : 'border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200',
+              )}
+            >
+              {t.label}
+              <span className="ml-1 text-[9px] opacity-60">{counts[t.key]}</span>
+            </button>
+          ))}
+          <span className="mx-0.5 h-4 w-px shrink-0 bg-zinc-800" />
           {KIND_TABS.map((t) => (
             <button
               key={t.key}
@@ -341,8 +423,6 @@ export function AssetsDialog() {
             </Button>
           </div>
         </div>
-
-        {/* 搜索 / 排序 / 系统海报开关 */}
         <div className="flex flex-wrap items-center gap-1.5">
           <div className="relative min-w-[150px] flex-1">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-zinc-500" />
@@ -395,7 +475,7 @@ export function AssetsDialog() {
             </div>
           ) : filtered.length === 0 ? (
             <div className="flex flex-col items-center gap-2 py-12 text-zinc-600">
-              {query.trim() || filter !== 'all' ? (
+              {query.trim() || filter !== 'all' || sourceFilter !== 'all' ? (
                 <>
                   <ImageOff className="h-8 w-8" />
                   <p className="text-xs">没有匹配的素材，试试调整筛选或关键词</p>
@@ -403,6 +483,7 @@ export function AssetsDialog() {
                     onClick={() => {
                       setQuery('')
                       setFilter('all')
+                      setSourceFilter('all')
                     }}
                     className="mt-1 rounded-md border border-zinc-700 px-2.5 py-1 text-[10px] text-zinc-300 transition hover:border-zinc-500 hover:bg-zinc-800"
                   >
@@ -418,10 +499,18 @@ export function AssetsDialog() {
             </div>
           ) : (
             <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
-              {filtered.map((item) => (
+              {filtered.map((item) => {
+                const isPreset = item.source === 'preset'
+                const displayName = isPreset ? presetDisplayName(item.name) : item.name
+                return (
                 <div
                   key={item.url}
-                  className="group overflow-hidden rounded-lg border border-zinc-800/80 bg-zinc-900/60 transition hover:border-zinc-600 hover:bg-zinc-900"
+                  className={cn(
+                    'group overflow-hidden rounded-lg border bg-zinc-900/60 transition hover:bg-zinc-900',
+                    isPreset
+                      ? 'border-amber-500/25 hover:border-amber-500/50'
+                      : 'border-zinc-800/80 hover:border-zinc-600',
+                  )}
                 >
                   <div className="relative aspect-video w-full overflow-hidden bg-zinc-950">
                     <AssetThumb item={item} />
@@ -435,12 +524,20 @@ export function AssetsDialog() {
                       )}
                       {fmtSize(item.size)}
                     </span>
+                    {isPreset && (
+                      <span className="absolute right-1.5 top-1.5 flex items-center gap-1 rounded bg-amber-500/90 px-1.5 py-0.5 text-[8.5px] font-medium text-zinc-950">
+                        <Package className="h-2.5 w-2.5" />
+                        预置
+                      </span>
+                    )}
                   </div>
                   <div className="space-y-1 p-2">
                     <p className="truncate text-[10px] text-zinc-300" title={item.name}>
-                      {item.name}
+                      {displayName}
                     </p>
-                    <p className="text-[9px] text-zinc-600">{fmtDate(item.mtime)}</p>
+                    <p className="text-[9px] text-zinc-600">
+                      {isPreset ? '平台预置 · 可直接使用' : fmtDate(item.mtime)}
+                    </p>
                     <div className="flex flex-wrap items-center gap-1 pt-0.5">
                       <button
                         onClick={() => insertAsset(item)}
@@ -450,6 +547,7 @@ export function AssetsDialog() {
                         <Plus className="h-3 w-3" />
                         插入画布
                       </button>
+                      {!isPreset && (
                       <div className="flex items-center">
                         <a
                           href={item.url}
@@ -481,13 +579,17 @@ export function AssetsDialog() {
                           <Trash2 className="h-3 w-3" />
                         </button>
                       </div>
+                      )}
                     </div>
                   </div>
                 </div>
-              ))}
+                )
+              })}
             </div>
           )}
         </ScrollArea>
+        </>
+        )}
 
         <input
           ref={fileRef}
@@ -502,5 +604,63 @@ export function AssetsDialog() {
         />
       </DialogContent>
     </Dialog>
+  )
+}
+
+/* ------------------------------ 灵感提示词面板 ------------------------------ */
+
+function InspirePane({ onCopy }: { onCopy: (text: string) => void }) {
+  const [copied, setCopied] = useState<string | null>(null)
+  const total = INSPIRATION_GROUPS.reduce((n, g) => n + g.items.length, 0)
+
+  const handlePick = (text: string) => {
+    onCopy(text)
+    setCopied(text)
+    window.setTimeout(() => setCopied((cur) => (cur === text ? null : cur)), 1500)
+  }
+
+  return (
+    <ScrollArea className="max-h-[52vh] pr-2">
+      <div className="space-y-4 pb-1">
+        <p className="rounded-md border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-[10px] leading-relaxed text-zinc-500">
+          {total} 条精选提示词，覆盖风格 / 光影 / 运镜 / 题材；点击卡片复制，粘贴到画布的任意「提示词」节点即可开跑。
+        </p>
+        {INSPIRATION_GROUPS.map((g) => (
+          <section key={g.key}>
+            <h3 className={cn('mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold', g.accent)}>
+              <Lightbulb className="h-3 w-3" />
+              {g.label}
+              <span className="text-[9px] font-normal text-zinc-600">{g.items.length}</span>
+            </h3>
+            <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+              {g.items.map((it) => (
+                <button
+                  key={it.text}
+                  onClick={() => handlePick(it.text)}
+                  className={cn(
+                    'group flex flex-col gap-0.5 rounded-lg border p-2.5 text-left transition',
+                    copied === it.text
+                      ? 'border-emerald-500/50 bg-emerald-500/10'
+                      : 'border-zinc-800 bg-zinc-900/40 hover:border-sky-500/40 hover:bg-sky-500/5',
+                  )}
+                >
+                  <span className="flex items-start gap-1.5">
+                    <span className="min-w-0 flex-1 text-[11px] leading-relaxed text-zinc-300 group-hover:text-zinc-100">
+                      {it.text}
+                    </span>
+                    {copied === it.text ? (
+                      <Check className="mt-0.5 h-3 w-3 shrink-0 text-emerald-300" />
+                    ) : (
+                      <Copy className="mt-0.5 h-3 w-3 shrink-0 text-zinc-600 transition group-hover:text-sky-300" />
+                    )}
+                  </span>
+                  {it.hint && <span className="text-[9px] text-zinc-600">{it.hint}</span>}
+                </button>
+              ))}
+            </div>
+          </section>
+        ))}
+      </div>
+    </ScrollArea>
   )
 }

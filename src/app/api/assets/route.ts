@@ -4,13 +4,17 @@ import path from 'path'
 import { db } from '@/lib/db'
 
 /**
- * 素材库 API：浏览 /generated 与 /uploads 下的全部媒体产物
+ * 素材库 API：浏览 /generated 与 /uploads 下的全部媒体产物，
+ * 以及 /presets 平台预置素材（只读：不可删除 / 重命名）
  */
 
+type AssetSource = 'generated' | 'upload' | 'preset'
+
 const ROOT = process.cwd()
-const DIRS = [
-  { dir: path.join(ROOT, 'public', 'generated'), prefix: '/generated' },
-  { dir: path.join(ROOT, 'public', 'uploads'), prefix: '/uploads' },
+const DIRS: { dir: string; prefix: string; source: AssetSource }[] = [
+  { dir: path.join(ROOT, 'public', 'generated'), prefix: '/generated', source: 'generated' },
+  { dir: path.join(ROOT, 'public', 'uploads'), prefix: '/uploads', source: 'upload' },
+  { dir: path.join(ROOT, 'public', 'presets'), prefix: '/presets', source: 'preset' },
 ]
 
 const KIND_BY_EXT: Record<string, 'image' | 'video' | 'audio'> = {
@@ -93,8 +97,9 @@ export async function GET(req: NextRequest) {
       name: string
       size: number
       mtime: number
+      source: AssetSource
     }[] = []
-    for (const { dir, prefix } of DIRS) {
+    for (const { dir, prefix, source } of DIRS) {
       let entries: { isFile: () => boolean; name: string }[] = []
       try {
         entries = (await fs.readdir(dir, {
@@ -116,10 +121,18 @@ export async function GET(req: NextRequest) {
           name: ent.name,
           size: st.size,
           mtime: st.mtimeMs,
+          source,
         })
       }
     }
-    items.sort((a, b) => b.mtime - a.mtime)
+    // 预置素材固定置顶（按名称），其余按时间倒序
+    items.sort((a, b) => {
+      const aP = a.source === 'preset'
+      const bP = b.source === 'preset'
+      if (aP !== bP) return aP ? -1 : 1
+      if (aP && bP) return a.name.localeCompare(b.name)
+      return b.mtime - a.mtime
+    })
     return NextResponse.json({ items: items.slice(0, 300) })
   } catch (e) {
     return NextResponse.json(
@@ -131,19 +144,22 @@ export async function GET(req: NextRequest) {
 
 /** 素材 URL 校验：允许任意非路径分隔符文件名（含中文），拒绝穿越 */
 function parseAssetUrl(url: string) {
-  const m = typeof url === 'string' ? url.match(/^\/(generated|uploads)\/([^/\\]+)$/) : null
+  const m = typeof url === 'string' ? url.match(/^\/(generated|uploads|presets)\/([^/\\]+)$/) : null
   if (!m) return null
   if (m[2].includes('..') && m[2].split('.').every((p) => p === '..')) return null // 纯穿越串
   return m
 }
 
-/** 删除素材（仅允许 /generated 与 /uploads 下的纯文件名） */
+/** 删除素材（仅允许 /generated 与 /uploads 下的纯文件名；预置素材只读不可删） */
 export async function DELETE(req: NextRequest) {
   try {
     const url = req.nextUrl.searchParams.get('url') ?? ''
     const m = parseAssetUrl(url)
     if (!m) {
       return NextResponse.json({ error: '非法的资源路径' }, { status: 400 })
+    }
+    if (m[1] === 'presets') {
+      return NextResponse.json({ error: '平台预置素材为只读，不可删除' }, { status: 403 })
     }
     const base = path.join(ROOT, 'public', m[1])
     const target = path.join(base, m[2])
@@ -171,6 +187,9 @@ export async function PATCH(req: NextRequest) {
     const m = parseAssetUrl(url)
     if (!m || typeof name !== 'string' || !name.trim()) {
       return NextResponse.json({ error: '参数无效' }, { status: 400 })
+    }
+    if (m[1] === 'presets') {
+      return NextResponse.json({ error: '平台预置素材为只读，不可重命名' }, { status: 403 })
     }
     const dir = path.join(ROOT, 'public', m[1])
     const oldName = m[2]

@@ -46,9 +46,17 @@ import {
   Trash2,
   Cpu,
   MessageSquareText,
+  Undo2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/lib/ai-canvas/store'
+import {
+  filterModelsForAbility,
+  MODEL_ABILITY_BADGE,
+  modelAbilities,
+  modelPrimaryAbility,
+  type ModelAbility,
+} from '@/lib/ai-canvas/model-abilities'
 import {
   ABILITY_LABEL,
   BUILTIN_PRESET,
@@ -63,6 +71,26 @@ import {
 } from '@/lib/ai-canvas/provider-presets'
 
 type Capability = 'llm' | 'image' | 'tts' | 'video'
+
+/** 账户模型列表的能力过滤（other = 向量/重排/识别等非创作能力） */
+type ListAbilityFilter = 'all' | ModelAbility
+
+const LIST_FILTERS: { key: ListAbilityFilter; label: string }[] = [
+  { key: 'all', label: '全部' },
+  { key: 'chat', label: '对话' },
+  { key: 'image', label: '生图' },
+  { key: 'tts', label: '配音' },
+  { key: 'video', label: '视频' },
+  { key: 'other', label: '其他' },
+]
+
+function matchesListFilter(m: string, f: ListAbilityFilter): boolean {
+  if (f === 'all') return true
+  if (f === 'other') {
+    return modelAbilities(m).every((x) => !['chat', 'image', 'tts', 'video'].includes(x))
+  }
+  return modelAbilities(m).includes(f)
+}
 
 const CAPS: Capability[] = ['llm', 'image', 'tts', 'video']
 const CAP_OF_ABILITY: Record<ProviderAbility, Capability> = {
@@ -214,6 +242,7 @@ export function SettingsDialog() {
   const [saving, setSaving] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [modelSearch, setModelSearch] = useState('')
+  const [listFilter, setListFilter] = useState<ListAbilityFilter>('all')
   const [newModel, setNewModel] = useState('')
   const [pickerOpen, setPickerOpen] = useState(false)
 
@@ -267,6 +296,7 @@ export function SettingsDialog() {
     setIsNew(false)
     setConfirmDelete(false)
     setModelSearch('')
+    setListFilter('all')
     setNewModel('')
   }
 
@@ -283,6 +313,7 @@ export function SettingsDialog() {
     setPickerOpen(false)
     setConfirmDelete(false)
     setModelSearch('')
+    setListFilter('all')
     setNewModel('')
   }
 
@@ -463,9 +494,23 @@ export function SettingsDialog() {
   const filteredModels = useMemo(() => {
     if (!draft) return []
     const kw = modelSearch.trim().toLowerCase()
-    const list = [...draft.models].sort((a, b) => a.localeCompare(b))
+    const list = [...draft.models].sort((a, b) => a.localeCompare(b)).filter((m) => matchesListFilter(m, listFilter))
     return kw ? list.filter((m) => m.toLowerCase().includes(kw)) : list
-  }, [draft, modelSearch])
+  }, [draft, modelSearch, listFilter])
+
+  /** 模型能力分布计数（能力 chips 用） */
+  const listAbilityCounts = useMemo(() => {
+    const c: Record<ListAbilityFilter, number> = { all: 0, chat: 0, image: 0, tts: 0, video: 0, other: 0 }
+    for (const m of draft?.models ?? []) {
+      c.all++
+      if (matchesListFilter(m, 'chat')) c.chat++
+      if (matchesListFilter(m, 'image')) c.image++
+      if (matchesListFilter(m, 'tts')) c.tts++
+      if (matchesListFilter(m, 'video')) c.video++
+      if (matchesListFilter(m, 'other')) c.other++
+    }
+    return c
+  }, [draft])
 
   const presetAdded = (presetId: string) => accounts?.some((a) => a.presetId === presetId) ?? false
 
@@ -578,6 +623,8 @@ export function SettingsDialog() {
                     saving={saving}
                     confirmDelete={confirmDelete}
                     filteredModels={filteredModels}
+                    abilityCounts={listAbilityCounts}
+                    abilityFilter={listFilter}
                     modelSearch={modelSearch}
                     newModel={newModel}
                     onPatch={patchDraft}
@@ -585,6 +632,7 @@ export function SettingsDialog() {
                     onSave={() => void save()}
                     onDelete={() => void remove()}
                     onModelSearch={setModelSearch}
+                    onAbilityFilter={setListFilter}
                     onNewModel={setNewModel}
                     onAddModel={() => {
                       const m = newModel.trim()
@@ -735,6 +783,8 @@ interface AccountPaneProps {
   saving: boolean
   confirmDelete: boolean
   filteredModels: string[]
+  abilityCounts: Record<ListAbilityFilter, number>
+  abilityFilter: ListAbilityFilter
   modelSearch: string
   newModel: string
   onPatch: (patch: Partial<Draft>) => void
@@ -742,6 +792,7 @@ interface AccountPaneProps {
   onSave: () => void
   onDelete: () => void
   onModelSearch: (v: string) => void
+  onAbilityFilter: (v: ListAbilityFilter) => void
   onNewModel: (v: string) => void
   onAddModel: () => void
   onRemoveModel: (m: string) => void
@@ -917,7 +968,7 @@ function AccountPane(p: AccountPaneProps) {
         </div>
       )}
 
-      {/* 模型列表 */}
+      {/* 模型列表（能力过滤 chips + 原生滚动适配，模型再多也不撑破容器） */}
       <div className="rounded-lg border border-zinc-800 bg-zinc-900/40">
         <div className="flex items-center gap-2 border-b border-zinc-800 px-3 py-2">
           <Search className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
@@ -929,31 +980,69 @@ function AccountPane(p: AccountPaneProps) {
             className="h-6 min-w-0 flex-1 bg-transparent text-[11px] text-zinc-200 outline-none placeholder:text-zinc-600 disabled:cursor-not-allowed"
           />
           <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-[9px] text-zinc-400">
-            {draft.models.length}
+            {p.abilityFilter === 'all' ? draft.models.length : `${p.filteredModels.length}/${draft.models.length}`}
           </span>
         </div>
-        {draft.models.length > 0 && (
-          <ScrollArea className="max-h-40">
-            <div className="p-1.5">
-              {p.filteredModels.map((m) => (
-                <div
-                  key={m}
-                  className="group flex items-center gap-2 rounded-md px-2 py-1 transition hover:bg-zinc-800/60"
+        {draft.models.length > 6 && (
+          <div className="flex flex-wrap items-center gap-1 border-b border-zinc-800 px-2.5 py-1.5">
+            {LIST_FILTERS.map((f) => {
+              const n = p.abilityCounts[f.key]
+              if (f.key !== 'all' && n === 0) return null
+              return (
+                <button
+                  key={f.key}
+                  onClick={() => p.onAbilityFilter(f.key)}
+                  className={cn(
+                    'rounded border px-1.5 py-0.5 text-[9px] transition',
+                    p.abilityFilter === f.key
+                      ? 'border-amber-500/50 bg-amber-500/15 text-amber-200'
+                      : 'border-zinc-800 text-zinc-500 hover:border-zinc-600 hover:text-zinc-300',
+                  )}
                 >
-                  <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-zinc-300" title={m}>
-                    {m}
-                  </span>
-                  <button
-                    onClick={() => p.onRemoveModel(m)}
-                    title="移除该模型"
-                    className="shrink-0 rounded p-0.5 text-zinc-600 opacity-0 transition hover:bg-rose-500/15 hover:text-rose-300 group-hover:opacity-100"
+                  {f.label}
+                  <span className="ml-0.5 opacity-60">{n}</span>
+                </button>
+              )
+            })}
+          </div>
+        )}
+        {draft.models.length > 0 && (
+          <div className="scrollbar-thin max-h-56 overflow-y-auto overscroll-contain">
+            <div className="p-1.5">
+              {p.filteredModels.map((m) => {
+                const ab = modelPrimaryAbility(m)
+                const badge = MODEL_ABILITY_BADGE[ab]
+                return (
+                  <div
+                    key={m}
+                    className="group flex items-center gap-2 rounded-md px-2 py-1 transition hover:bg-zinc-800/60"
                   >
-                    <Trash2 className="h-3 w-3" />
-                  </button>
-                </div>
-              ))}
+                    <span
+                      className={cn(
+                        'shrink-0 rounded border px-1 py-px text-[8px] leading-none',
+                        badge?.cls ?? 'border-zinc-700 bg-zinc-800/60 text-zinc-400',
+                      )}
+                    >
+                      {badge?.label ?? '模型'}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-zinc-300" title={m}>
+                      {m}
+                    </span>
+                    <button
+                      onClick={() => p.onRemoveModel(m)}
+                      title="移除该模型"
+                      className="shrink-0 rounded p-0.5 text-zinc-600 opacity-0 transition hover:bg-rose-500/15 hover:text-rose-300 group-hover:opacity-100"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  </div>
+                )
+              })}
+              {p.filteredModels.length === 0 && (
+                <p className="px-2 py-3 text-center text-[10px] text-zinc-600">当前筛选条件下没有模型</p>
+              )}
             </div>
-          </ScrollArea>
+          </div>
         )}
         <div className="flex items-center gap-1.5 border-t border-zinc-800 px-2.5 py-2">
           <input
@@ -1043,7 +1132,10 @@ function RoutingPane({
             )
             const current = r.providerKind === 'account' ? accountById.get(r.accountId) : undefined
             const currentIneligible = current && !eligible.some((e) => e.id === current.id)
-            const models = current?.models ?? []
+            const allModels = current?.models ?? []
+            // 按能力域过滤：文本模型只能进 LLM 路由、图像只能进图像路由（当前已选值强制保留）
+            const models = filterModelsForAbility(allModels, meta.ability, r.model)
+            const hiddenCount = Math.max(0, allModels.length - models.length)
 
             return (
               <div
@@ -1072,22 +1164,16 @@ function RoutingPane({
 
                 {isVideo ? (
                   <p className="mt-2.5 rounded-md border border-zinc-800/70 bg-zinc-950/60 px-2.5 py-2 text-[10px] leading-relaxed text-zinc-500">
-                    视频生成协议各平台差异较大，暂使用内置智谱（CogVideoX）；自定义视频供应商接入已在规划中。
+                    视频生成协议各平台差异较大，默认使用内置智谱（CogVideoX）；自定义视频供应商接入已在规划中。
                   </p>
-                ) : (
+                ) : r.providerKind === 'account' ? (
                   <div className="mt-2.5 space-y-2">
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-                      <div className="flex min-w-[210px] items-center gap-2">
+                      <div className="flex min-w-[200px] items-center gap-2">
                         <span className="w-[40px] shrink-0 text-[10px] text-zinc-500">供应商</span>
                         <Select
-                          value={r.providerKind === 'account' ? r.accountId : 'builtin'}
-                          onValueChange={(v) =>
-                            onPatch(cap, {
-                              providerKind: v === 'builtin' ? 'builtin' : 'account',
-                              accountId: v === 'builtin' ? '' : v,
-                              model: '',
-                            })
-                          }
+                          value={current?.id ?? r.accountId}
+                          onValueChange={(v) => onPatch(cap, { accountId: v, model: '' })}
                           disabled={saving}
                         >
                           <SelectTrigger
@@ -1097,9 +1183,6 @@ function RoutingPane({
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent className="border-zinc-700 bg-zinc-900 text-zinc-200">
-                            <SelectItem value="builtin" className="text-[11px]">
-                              内置智谱
-                            </SelectItem>
                             {eligible.map((a) => (
                               <SelectItem key={a.id} value={a.id} className="text-[11px]">
                                 {a.name}
@@ -1113,39 +1196,57 @@ function RoutingPane({
                           </SelectContent>
                         </Select>
                       </div>
-                      {r.providerKind === 'account' && (
-                        <div className="flex min-w-[210px] flex-1 items-center gap-2">
-                          <span className="w-[40px] shrink-0 text-[10px] text-zinc-500">模型</span>
-                          {models.length > 0 ? (
-                            <Select value={r.model} onValueChange={(v) => onPatch(cap, { model: v })} disabled={saving}>
-                              <SelectTrigger
-                                size="sm"
-                                className="h-7 flex-1 border-zinc-800 bg-zinc-900 font-mono text-[10.5px] text-zinc-200 focus-visible:ring-zinc-700 data-[size=sm]:h-7"
-                              >
-                                <SelectValue placeholder="选择模型" />
-                              </SelectTrigger>
-                              <SelectContent className="border-zinc-700 bg-zinc-900 text-zinc-200">
-                                {models.map((m) => (
-                                  <SelectItem key={m} value={m} className="font-mono text-[10.5px]">
-                                    {m}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          ) : (
-                            <input
-                              value={r.model}
-                              onChange={(e) => onPatch(cap, { model: e.target.value })}
-                              placeholder="该账户尚未获取模型列表，手输模型名"
-                              disabled={saving}
-                              spellCheck={false}
-                              className="h-7 min-w-0 flex-1 rounded-md border border-zinc-800 bg-zinc-900/60 px-2 font-mono text-[10.5px] text-zinc-200 outline-none transition placeholder:font-sans placeholder:text-zinc-600 focus:border-amber-500/50"
-                            />
-                          )}
-                        </div>
-                      )}
+                      <div className="flex min-w-[210px] flex-1 items-center gap-2">
+                        <span className="w-[40px] shrink-0 text-[10px] text-zinc-500">模型</span>
+                        {models.length > 0 ? (
+                          <Select value={r.model} onValueChange={(v) => onPatch(cap, { model: v })} disabled={saving}>
+                            <SelectTrigger
+                              size="sm"
+                              className="h-7 flex-1 border-zinc-800 bg-zinc-900 font-mono text-[10.5px] text-zinc-200 focus-visible:ring-zinc-700 data-[size=sm]:h-7"
+                            >
+                              <SelectValue placeholder="选择模型" />
+                            </SelectTrigger>
+                            <SelectContent className="max-h-72 border-zinc-700 bg-zinc-900 text-zinc-200">
+                              {hiddenCount > 0 && (
+                                <div className="border-b border-zinc-800 px-2 pb-1.5 pt-1 text-[9px] leading-relaxed text-zinc-500">
+                                  已按「{ABILITY_LABEL[meta.ability]}」能力过滤 {hiddenCount} 个无关模型
+                                </div>
+                              )}
+                              {models.map((m) => (
+                                <SelectItem key={m} value={m} className="font-mono text-[10.5px]">
+                                  {m}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        ) : (
+                          <input
+                            value={r.model}
+                            onChange={(e) => onPatch(cap, { model: e.target.value })}
+                            placeholder={
+                              allModels.length > 0
+                                ? `未识别到「${ABILITY_LABEL[meta.ability]}」模型，手输模型名`
+                                : '该账户尚未获取模型列表，手输模型名'
+                            }
+                            disabled={saving}
+                            spellCheck={false}
+                            className="h-7 min-w-0 flex-1 rounded-md border border-zinc-800 bg-zinc-900/60 px-2 font-mono text-[10.5px] text-zinc-200 outline-none transition placeholder:font-sans placeholder:text-zinc-600 focus:border-amber-500/50"
+                          />
+                        )}
+                      </div>
+                      <button
+                        onClick={() =>
+                          onPatch(cap, { providerKind: 'builtin', accountId: '', model: '', voice: '' })
+                        }
+                        disabled={saving}
+                        title="停用该供应商，恢复默认内置智谱"
+                        className="flex h-7 shrink-0 items-center gap-1 rounded-md border border-zinc-800 px-2 text-[10px] text-zinc-400 transition hover:border-amber-500/40 hover:bg-amber-500/10 hover:text-amber-200 disabled:opacity-40"
+                      >
+                        <Undo2 className="h-3 w-3" />
+                        恢复内置
+                      </button>
                     </div>
-                    {cap === 'tts' && r.providerKind === 'account' && (
+                    {cap === 'tts' && (
                       <div className="flex items-center gap-2">
                         <span className="w-[40px] shrink-0 text-[10px] text-zinc-500">音色</span>
                         <input
@@ -1158,8 +1259,55 @@ function RoutingPane({
                         />
                       </div>
                     )}
-                    {r.providerKind === 'account' && !r.enabled && (
+                    {!r.enabled && (
                       <p className="text-[10px] text-amber-400/70">已停用：执行时将回落内置智谱。</p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="mt-2.5 space-y-2">
+                    <div className="flex items-start gap-2 rounded-md border border-emerald-500/20 bg-emerald-500/5 px-2.5 py-2">
+                      <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-emerald-300" />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[10px] leading-relaxed text-emerald-200/90">
+                          默认使用内置智谱（GLM / CogView / TTS），开箱即用无需配置
+                        </p>
+                        <p className="mt-0.5 text-[9px] leading-relaxed text-zinc-600">
+                          下方接入供应商后执行将改走该模型；失败时仍自动回落内置服务
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="w-[40px] shrink-0 text-[10px] text-zinc-500">覆盖</span>
+                      <Select
+                        value={undefined}
+                        onValueChange={(v) =>
+                          onPatch(cap, { providerKind: 'account', accountId: v, model: '' })
+                        }
+                        disabled={saving || eligible.length === 0}
+                      >
+                        <SelectTrigger
+                          size="sm"
+                          className="h-7 flex-1 border-zinc-800 bg-zinc-900 text-[11px] text-zinc-200 focus-visible:ring-zinc-700 data-[size=sm]:h-7 data-[placeholder]:text-zinc-500"
+                        >
+                          <SelectValue
+                            placeholder={
+                              eligible.length > 0 ? '选择供应商覆盖内置…' : '暂无支持该能力的供应商'
+                            }
+                          />
+                        </SelectTrigger>
+                        <SelectContent className="border-zinc-700 bg-zinc-900 text-zinc-200">
+                          {eligible.map((a) => (
+                            <SelectItem key={a.id} value={a.id} className="text-[11px]">
+                              {a.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    {eligible.length === 0 && (
+                      <p className="text-[9px] leading-relaxed text-zinc-600">
+                        先在「模型服务」标签页接入一家支持该能力的供应商（协议需匹配）。
+                      </p>
                     )}
                   </div>
                 )}
@@ -1171,7 +1319,7 @@ function RoutingPane({
 
       <div className="flex items-center justify-between gap-2 border-t border-zinc-800 pt-3">
         <p className="text-[10px] leading-relaxed text-zinc-600">
-          提示词优化失败会自动回落内置模型；图像 / 语音配置后执行即走自定义服务。
+          各能力默认使用内置智谱；接入供应商后按需切换，模型下拉只展示匹配能力域的模型。
         </p>
         <Button
           size="sm"

@@ -966,3 +966,85 @@ Task: 按用户要求升级模型服务配置——预置常见供应商（参�
 2. 视频供应商配置化接入（提交+轮询两段式），打通完整多供应商视频链路
 3. 节点级模型覆写（同一能力下不同节点可用不同模型）；供应商余额/用量查询
 4. 产品 URL 部署与 README/About 填写
+
+---
+Task ID: 17-e
+Agent: full-stack-developer
+Task: 扩展 10 个场景模板（12→22）
+
+Work Log:
+- 读 worklog.md（Task 15/16）了解项目现状；读 src/lib/ai-canvas/templates.ts 学习现有 12 个模板的 node()/edge() 写法、分类体系与文案风格
+- 通读 src/lib/ai-canvas/types.ts 的 NODE_SPECS，逐一核对 14 种节点的参数 schema（prompt.text / enhancer.fallbackText+style+target / imageGen.prompt+size / imageEdit.prompt+size / textToVideo.prompt+quality+withAudio / imageToVideo.prompt+quality+withAudio / tts.fallbackText+voice+speed / concat.transition+transitionDuration+fitMode+fastPreview / avMerge.keepOriginal+videoVolume+audioVolume+durationMode / asset.assetKind+assetUrl+assetName）与全部输入输出端口 id
+- 在 TEMPLATES 数组末尾追加 10 个新模板（未动任何既有模板），每个 6-13 节点、连线完整可跑，提示词含具体光影/运镜/氛围词：
+  1. suspense-drama 悬疑反转 · 三幕短剧（短剧创作，12 节点）：铺垫→异常→反转纯 prompt 分镜 + concat 叠化 + 旁白 TTS + avMerge
+  2. vertical-emotion 竖屏情感 · 快节奏短剧（短剧创作，8 节点）：三段提示词内置「竖屏 9:16 构图」描述，concat 用 transition=none 硬切快剪
+  3. lyric-mv 歌词意象 · 写意 MV（音乐 MV，13 节点）：歌词 prompt → 主 enhancer 提炼意象 → 3 个子 enhancer（fallbackText 各写一段起承转意境）→ 3 段 t2v → concat 叠化 → asset 音频轨（assetKind=audio）→ avMerge，audioPreview 预览
+  4. beat-cut-mv 节奏混剪 · 快切 MV（音乐 MV，10 节点）：4 段强节奏画面（每段 prompt 均含明确运动动词：划燃/爆发/压弯飞驰/跃入炸裂），concat transition=none 硬切卡点（concat 仅 4 输入端口，故取 4 段）
+  5. product-launch 新品发布 · 悬念预热片（营销宣传，11 节点）：悬念开场 t2v + imageUpload → imageEdit 发布会舞台场景化重绘 → imageToVideo 揭晓动画 → concat + 悬念旁白 TTS → avMerge
+  6. festival-greeting 节日贺岁 · 品牌祝福（营销宣传，12 节点）：春节三景（灯火/团圆/烟花）+ 祝福语 TTS + avMerge
+  7. history-doc 历史人文 · 微纪录片（知识创作，11 节点）：敦煌石窟题材解说词 TTS（speed 0.9 沉稳）+ 凿窟/盛世/守护三段电影感场景重现 + concat + avMerge
+  8. kids-picturebook 儿童绘本 · 故事动画（知识创作，11 节点）：「小云朵棉花糖」3 张明快扁平风 imageGen 插画（1024x576）→ imageToVideo 轻动画 → concat + 温柔讲述 TTS（speed 0.9）→ avMerge
+  9. travel-vlog 旅行 Vlog · 风光混剪（生活记录 · 新分类，12 节点）：滇西北三站风光（湖畔晨雾/山间公路/海岸日落）+ 轻松治愈旁白 TTS + avMerge
+  10. food-film 美食短片 · 治愈烟火（生活记录，12 节点）：葱油拌面三镜（食材特写/烹饪过程/成品）暖色调 prompt + 旁白 TTS（标注可选）+ avMerge
+- 布局沿用现有规范：列间距 360-380px、行间距 320-350px（imageGen/imageToVideo 带预览的列加大到 ~350px 防重叠），标签走 node() 第五参 label
+- 核对 templates-dialog.tsx：分类 chips 由 useMemo 从 TEMPLATES 的 category 动态去重生成（含计数），非硬编码 → 「生活记录」无需改代码即可自动出现，templates-dialog.tsx 零改动
+- 用一次性脚本校验全部 22 个模板：节点 id 唯一、params 键均在 NODE_SPECS schema 内、edge 的 source/target handle 均存在 → 10 个新模板全部通过（唯一告警来自既有模板 enhance-only 的 e2→e3(prompt 无输入端口) 连线，属 Task 前已存在的问题，按任务要求未改动）
+- bun run lint 通过（templates.ts / templates-dialog.tsx 均无报错，未改动任何其他 src 文件）
+
+Stage Summary:
+- 新增 10 个模板：suspense-drama(12) / vertical-emotion(8) / lyric-mv(13) / beat-cut-mv(10) / product-launch(11) / festival-greeting(12) / history-doc(11) / kids-picturebook(11) / travel-vlog(12) / food-film(12)，TEMPLATES 总数 12→22
+- 分类分布：基础入门 5、营销带货 2、短剧创作 4、音乐 MV 3、营销宣传 3、知识创作 3、生活记录 2（新分类）
+- 分类 chips：templates-dialog.tsx 为动态生成（源自 TEMPLATES category 去重 + 计数），无需改动、实际零改动
+- lint：通过，无错误
+
+---
+
+## Task ID: 17 — 模型服务体验修复 + 模板/素材库大扩充
+Agent: main (Z.ai Code) + full-stack-developer 子代理（17-e 模板）
+Task: 用户反馈 4 项：①能力路由模型按能力域过滤 ②模型列表外框适配 ③内置智谱不显示在路由下拉 ④多预置模板和素材库
+
+### 项目当前状态描述/判断
+- Task 16 供应商体系运行正常；本轮全部 4 项反馈已修复并端到端验证，测试数据已清理
+
+### 已完成内容
+
+**1. 滚动容器全局修复（17-a）**
+- 根因：Radix ScrollArea 的 Viewport 为 size-full，父级仅有 max-height（无固定高）时 height:100% 解析为 auto → 130 个模型把面板撑爆（用户截图问题）
+- 修复：ui/scroll-area.tsx Viewport 加 max-h-[inherit]（继承 Root 的 max-height，一处修复全部对话框受益：预置选择器/路由面板/素材库/账户编辑）；账户模型列表另加原生 scrollbar-thin 滚动双保险
+
+**2. 能力路由模型按能力域过滤（17-b）**
+- 新模块 src/lib/ai-canvas/model-abilities.ts：模型名启发式分类（参考 Cherry Studio/new-api）——embedding/rerank/asr 排除类优先，tts/image/video 关键字归类，其余归 chat；filterModelsForAbility 保证当前已选值强制保留
+- 路由模型下拉：LLM 行只显示对话模型、图像行只显示生图模型…顶部提示「已按「对话」能力过滤 N 个无关模型」，SelectContent max-h-72
+- 账户模型列表：能力过滤 chips（全部/对话/生图/配音/视频/其他，带计数，>6 模型时出现）+ 每行彩色能力徽章 + 计数显示 n/total
+
+**3. 内置智谱从路由下拉移除（17-c）**
+- 默认态（未选供应商）：绿色说明卡「默认使用内置智谱（GLM/CogView/TTS），开箱即用」+「覆盖」下拉（仅列已配置账户，placeholder 引导）；无匹配账户时提示先去模型服务接入
+- 账户态：供应商/模型下拉 +「恢复内置」按钮（一键重置为默认）；底部说明同步更新
+
+**4. 模板扩充 12→22（17-e，子代理完成）**
+- 新增 10 个：悬疑反转三幕/竖屏情感快节奏（短剧4）、歌词意象写意 MV/节奏混剪快切（MV3）、新品发布悬念/节日贺岁（营销宣传3）、历史人文微纪录片/儿童绘本故事动画（知识创作3）、旅行 Vlog 风光混剪/美食短片治愈烟火（新分类「生活记录」2）
+- 分类 chips 动态生成自动纳入新分类；子代理用脚本校验 22 模板节点参数/连线合法性全通过
+
+**5. 预置素材库（17-f）**
+- public/presets/：8 张 AI 生成风格参考图（电影城市/江南水乡/赛博朋克/水墨山水/绘本橘猫/美食/太空/日落，1344x768）+ 3 段 TTS 示例旁白（品牌口播 tongtong/纪录片 xiaochen/预告片 luodo）
+- /api/assets：扫描 presets 目录 + source 字段（generated/upload/preset），预置置顶排序；DELETE/PATCH 对 presets 返回 403 只读保护（实测）
+- 素材库 UI：双 tab「媒体素材/灵感提示词」；来源筛选（全部/平台预置/我的素材带计数）；预置卡片琥珀徽标 + 显示名美化（style-cinematic-city → cinematic city）+ 隐藏删除/重命名/导出按钮
+- 灵感提示词库 inspiration.ts：42 条精选（风格质感 12/光影氛围 10/运镜术语 10/题材灵感 10），点击复制到剪贴板 + 绿色 ✓ 反馈
+
+### 验证结果（agent-browser 端到端实测）
+- lint 0 错误；console 无错误
+- 素材库：预置 11 项置顶显示 + 来源/类型筛选 ✓；灵感 tab 42 条渲染 + 点击复制反馈 ✓
+- 模型服务：mock 服务（升级为 6 混合能力模型）测试连接 → 能力徽章正确（向量/生图/对话/配音/视频分类）→ 保存 ✓
+- 能力路由：LLM 行选 Mock → 模型下拉只显示 2 个对话模型（过滤 4 个）✓；图像行只显示 mock-image-master（过滤 5 个）✓；保存路由成功 ✓
+- 模板：22 个 + 生活记录分类 ✓；「美食短片」载入 12 节点 11 连线提示词预填 ✓
+- 清理：Mock 账户删除（2 路由级联重置 builtin）✓；mock 服务停止；工作区恢复「故事分镜·三幕成片」
+
+### 未解决问题 / 风险
+- 模型能力分类为命名启发式，极少数自定义命名模型可能被误归「对话」——用户可手输兜底（路由下拉有手输路径）
+- 视频供应商仍未开放自定义（规划中）；产品公网 URL 仍待用户提供
+- 旧模板 enhance-only 存在 enhancer→prompt 连线告警（历史遗留，不影响使用）
+
+### 下一轮建议（优先级从高到低）
+1. 真实供应商 key 实测（DeepSeek/硅基流动）；视频供应商两段式配置化接入
+2. 节点级模型覆写（同能力不同节点不同模型）；供应商余额查询
+3. 素材库扩展：预置 BGM/音效包；灵感提示词支持一键注入选中节点
